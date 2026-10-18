@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.data/
+data/raw/
+data/processed/
+artifacts/
+src/ui/node_modules/
+src/ui/.next/

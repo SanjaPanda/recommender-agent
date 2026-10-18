@@ -1,0 +1,44 @@
+{"query":"a money box shaped like an airplane for a child","relevant_ids":["09fe7f75451518b6d12d136a103a54da863a870ba51dd746bf4caca2d8c765a0"]}
+{"query":"compact folding washing machine for a dorm or camping trip","relevant_ids":["d6c82e52daf8e018ba8a0f187bea4041f7630cb24d4d9733e49cd7d704f4fb49"]}
+{"query":"cute LED ghost lamp for a child's bedside","relevant_ids":["244102de499c761191d537ebe2ae401b8d83169c14cf22483091d909850eb2a4"]}
+{"query":"soft snail toy for a baby who is teething","relevant_ids":["59623c56bd8a013b08a89f61c1d4602f4cbcc0817e7ccb3f5f1d351c50af60e2"]}
+{"query":"bass trombone outfit with independent valves","relevant_ids":["adedb204040fbdd77a2d9ba9c33c194dbc10a7c991c65ea3c51c2ffa5811450b"]}
+{"query":"portable screen to block wind while camping outdoors","relevant_ids":["4a3ebbb7393971a15edf728ac0b676cf962bf2492ce2deccbc4848da27e14454"]}
+{"query":"clear adhesive tape for sealing shipping packages","relevant_ids":["13b05e721898d15fee9499ef4b4a6c5f58f2d2d16f04258d7a1666116ee806e0"]}
+{"query":"battery powered brush cutter attachment for yard work","relevant_ids":["5746f66a8e8bbcb32b0cdb63891789813817c670d057fb93aa3b61277df18fc1"]}
+{"query":"refillable butane soldering torch kit with accessories","relevant_ids":["0c8f3eb4ca78f02161bea2c372e64258611a47aaa9dceb13747aa6ebfe4cc2b4"]}
+{"query":"stainless insulated chimney flue pipe for a sealed room heater","relevant_ids":["93f4e6e6673e756a557ea35a7003896c9e373e68fdb07482e0d27f99dec847b3"]}
+{"query":"slim orthodontic case for clear aligners with a small mirror","relevant_ids":["209410c7830ab41d2191c33778cf42bce62859ff7af8e7b36850475074079455"]}
+{"query":"open top heavy duty pouch for carrying lots of hand tools","relevant_ids":["852a6704a33efcd3745bfe57fc5b4a4dd216ce298d014faace6eb7ece9056ca4"]}
+{"query":"a fun place for a child to save pocket money, shaped like a plane","relevant_ids":["09fe7f75451518b6d12d136a103a54da863a870ba51dd746bf4caca2d8c765a0"]}
+{"query":"I need a tiny clothes washer that folds away in my apartment","relevant_ids":["d6c82e52daf8e018ba8a0f187bea4041f7630cb24d4d9733e49cd7d704f4fb49"]}
+{"query":"night-time bedside lighting with a cute Halloween ghost design","relevant_ids":["244102de499c761191d537ebe2ae401b8d83169c14cf22483091d909850eb2a4"]}
+{"query":"a baby-safe soft toy for sore gums that makes a crinkly sound","relevant_ids":["59623c56bd8a013b08a89f61c1d4602f4cbcc0817e7ccb3f5f1d351c50af60e2"]}
+{"query":"low-pitched brass instrument for a trombone player, with separate valves","relevant_ids":["adedb204040fbdd77a2d9ba9c33c194dbc10a7c991c65ea3c51c2ffa5811450b"]}
+{"query":"portable fabric barrier that shields a beach or campsite from gusts","relevant_ids":["4a3ebbb7393971a15edf728ac0b676cf962bf2492ce2deccbc4848da27e14454"]}
+{"query":"a long roll of see-through parcel sealing tape","relevant_ids":["13b05e721898d15fee9499ef4b4a6c5f58f2d2d16f04258d7a1666116ee806e0"]}
+{"query":"compatible power tool accessory to cut back brush and weeds","relevant_ids":["5746f66a8e8bbcb32b0cdb63891789813817c670d057fb93aa3b61277df18fc1"]}
+{"query":"small refillable gas torch for soldering and electronics repairs","relevant_ids":["0c8f3eb4ca78f02161bea2c372e64258611a47aaa9dceb13747aa6ebfe4cc2b4"]}
+{"query":"exhaust pipe for a sealed-combustion heater, stainless and insulated","relevant_ids":["93f4e6e6673e756a557ea35a7003896c9e373e68fdb07482e0d27f99dec847b3"]}
+{"query":"compact case to keep clear dental aligners clean, with a mirror","relevant_ids":["209410c7830ab41d2191c33778cf42bce62859ff7af8e7b36850475074079455"]}
+{"query":"a wide-mouth organizer bag with lots of pockets for jobsite tools","relevant_ids":["852a6704a33efcd3745bfe57fc5b4a4dd216ce298d014faace6eb7ece9056ca4"]}
+{"query":"book a hotel room near the airport for tonight","relevant_ids":[],"expected_empty":true}
+{"query":"schedule a professional house cleaning service this weekend","relevant_ids":[],"expected_empty":true}
+{"query":"buy a monthly cloud storage subscription","relevant_ids":[],"expected_empty":true}
+{"query":"find tickets for a live jazz concert in my city","relevant_ids":[],"expected_empty":true}
+{"query":"order a fresh grocery delivery box with fruit and vegetables","relevant_ids":[],"expected_empty":true}
+{"query":"recommend a product under 500 rupees","relevant_ids":[],"expected_empty":true,"unsupported_constraint":"price is not available as a structured catalogue field"}
+{"query":"a folding blade I can keep clipped in a pocket for daily use","relevant_ids":["46bb77b8799076397a815aedbe22e570387767e2954dad05862a0c893d077a3c"]}
+{"query":"comfortable wireless headband headphones for listening in bed","relevant_ids":["93a96a0539209092e599831d83ba3a697fdc166432fc322a850727d3deea3075"]}
+{"query":"fingerprint-secured padlock for a locker or gate","relevant_ids":["31664fde5297a2733e4e53bb3ea9c943466f90b725d9d4af662435a2829c894f"]}
+{"query":"replacement flat-free ribbed tire for a wheelbarrow","relevant_ids":["7e729e257eb2abc00a123335d1fec007149bc7e03fd9c57fc789d96509826377"]}
+{"query":"windfoil board for riding on the water","relevant_ids":["4729cdfb5e30972fa5cccb747932b483d926a4b81d1d92121a43672b4bfc30bc"]}
+{"query":"small shoulder bag for storing and carrying golf distance-measuring sticks","relevant_ids":["308530ac6cafb840f556c5dbb277cb6932c1e4b6baf77eb150c8319bab43c3a8"]}
+{"query":"rake attachment to scoop leaves from a swimming pool","relevant_ids":["22af9b547228be0b6f2c91386dd1eef5e0bb5fb9760e84dc2fcc0b31f115445d"]}
+{"query":"a wooden shoe stretcher to make tight footwear fit better","relevant_ids":["5412c753a61527810fd8fb3c3703fb4f6092fff9c98eb8f52f139a55fc1c3d6c"]}
+{"query":"fingerprint access lock for securing a small storage space","relevant_ids":["31664fde5297a2733e4e53bb3ea9c943466f90b725d9d4af662435a2829c894f"]}
+{"query":"adjustable backrest for a child's bed with built-in drawers","relevant_ids":["0478d98c13fb288f6827121a5bbd179e21fe2aec0530906b364ca8932500f63b"]}
+{"query":"find a nearby mechanic who can replace my car's brake pads","relevant_ids":[],"expected_empty":true}
+{"query":"book a table for two at an Italian restaurant tonight","relevant_ids":[],"expected_empty":true}
+{"query":"hire a licensed electrician to rewire my kitchen","relevant_ids":[],"expected_empty":true}
+{"query":"get a taxi to the train station in twenty minutes","relevant_ids":[],"expected_empty":true}
