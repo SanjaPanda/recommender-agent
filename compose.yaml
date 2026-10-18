@@ -20,8 +20,6 @@ services:
   web:
     build:
       context: ./src/ui
-      args:
-        API_ORIGIN: http://host.docker.internal:8000
     container_name: recommender-web
     restart: unless-stopped
     environment:

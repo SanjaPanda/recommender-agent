@@ -16,7 +16,9 @@ export const ProductActions = createContext<{
   selected: string[];
   recommendations: boolean;
   toggle: (id: string) => void;
-}>({ selected: [], recommendations: false, toggle: () => undefined });
+  addToCart: (id: string) => void;
+  busy: boolean;
+}>({ selected: [], recommendations: false, toggle: () => undefined, addToCart: () => undefined, busy: false });
 
 const definitions = {
   ProductGallery: {
@@ -30,17 +32,17 @@ const renderers: CatalogRenderers<typeof definitions> = {
     const actions = useContext(ProductActions);
     const products = Array.isArray(props.products) ? props.products as Product[] : [];
     const heading = typeof props.heading === "string" ? props.heading : "Products";
-    const recommended = actions.recommendations;
+    const recommended = false;
     return <section className="a2ui-gallery">
       <div className="section-head"><div><div className="eyebrow">{recommended ? "A BETTER FIT, FOUND" : "A GOOD PLACE TO START"}</div><h2>{heading}</h2></div>
         {!recommended && <span className="selection-count">{actions.selected.length}/3 selected</span>}</div>
       <div className="product-grid">{products.map((product, index) => {
         const active = actions.selected.includes(product.id);
-        return <button key={product.id} className={`product-card ${active ? "is-selected" : ""} ${recommended ? "is-result" : ""}`} onClick={() => !recommended && actions.toggle(product.id)} aria-pressed={active} disabled={recommended}>
+        return <div key={product.id}><button className={`product-card ${active ? "is-selected" : ""} ${recommended ? "is-result" : ""}`} onClick={() => !recommended && actions.toggle(product.id)} aria-pressed={active} disabled={actions.busy}>
           <div className="image-wrap">{product.image_url ? <img src={product.image_url} alt={product.title} loading={index < 3 ? "eager" : "lazy"} /> : <div className="image-placeholder">Image unavailable</div>}
             {!recommended && <span className={`pick-indicator ${active ? "checked" : ""}`}>{active ? "✓" : "+"}</span>}</div>
           <div className="product-info"><span className="product-number">{String(index + 1).padStart(2, "0")}</span><div><h3>{product.title || "Untitled product"}</h3><p>{product.brand || product.category || "Catalogue find"}</p></div></div>
-        </button>;
+        </button><button type="button" disabled={actions.busy} onClick={() => actions.addToCart(product.id)}>Add to cart</button></div>;
       })}</div>
       {!products.length && <p className="empty-state">No matches surfaced. Try describing the product a little differently.</p>}
     </section>;

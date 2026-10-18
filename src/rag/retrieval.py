@@ -24,6 +24,7 @@ def retrieve_products(
     category_prefixes: list[str] | None = None,
     limit: int = 5,
     image_weight: float = 0.5,
+    filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve catalogue candidates using accumulated text and selected examples.
 
@@ -40,27 +41,26 @@ def retrieve_products(
         raise ValueError("at most three selected product examples are supported")
     if len(set(refs)) != len(refs):
         raise ValueError("selected product IDs must be unique")
-    if not query_context.strip() and not refs:
-        return []
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("Set DATABASE_URL to the PostgreSQL database.")
 
-    category_clause = ""
-    category_params: list[Any] = []
-    if category_prefixes:
-        category_clause = " AND (" + " OR ".join(
-            "p.raw_source ->> 'ground_truth_category' ILIKE %s"
-            for _ in category_prefixes
-        ) + ")"
-        category_params = [prefix + "%" for prefix in category_prefixes]
+    category_clause, category_params = filter_clause(filters or {}, category_prefixes or [])
 
     candidate_limit = max(limit * 10, 50)
     image_rows: list[tuple[Any, ...]] = []
     text_rows: list[tuple[Any, ...]] = []
     with psycopg.connect(database_url, connect_timeout=5) as connection:
         register_vector(connection)
+        if not query_context.strip() and not refs:
+            rows = connection.execute(
+                "SELECT p.id,p.title,p.description,p.brand,p.category,p.image,p.is_secondhand "
+                "FROM products p WHERE true" + category_clause + " ORDER BY p.id LIMIT %s",
+                (*category_params, limit),
+            ).fetchall()
+            return [dict(zip(["id","title","description","brand","category","image_meta","is_secondhand"], row),
+                         score=0.0, image_similarity=None, text_similarity=None) for row in rows]
         if refs:
             placeholders = ", ".join("%s" for _ in refs)
             reference_rows = connection.execute(
@@ -153,3 +153,39 @@ def retrieve_products(
             item["score"] += weight / (60 + rank)
 
     return sorted(fused.values(), key=lambda item: item["score"], reverse=True)[:limit]
+
+
+def filter_clause(filters: dict, category_prefixes: list[str]) -> tuple[str, list]:
+    """Compile the allowlisted filter contract to parameterized SQL."""
+    allowed = {"brand", "is_secondhand", "category_prefixes"}
+    if set(filters) - allowed:
+        raise ValueError("Unsupported catalogue filter")
+    clauses, params = [], []
+    prefixes = filters.get("category_prefixes") or category_prefixes
+    if prefixes:
+        terms = []
+        for prefix in prefixes:
+            # Compare exact category or a descendant; user wildcards are literal.
+            terms.append("(p.raw_source ->> 'ground_truth_category' = %s OR starts_with(p.raw_source ->> 'ground_truth_category', %s))")
+            params.extend([prefix, prefix + " > "])
+        clauses.append("(" + " OR ".join(terms) + ")")
+    if filters.get("brand") is not None:
+        clauses.append("lower(p.brand) = lower(%s)")
+        params.append(filters["brand"])
+    if filters.get("is_secondhand") is not None:
+        if not isinstance(filters["is_secondhand"], bool):
+            raise ValueError("is_secondhand must be a boolean")
+        clauses.append("p.is_secondhand = %s")
+        params.append(filters["is_secondhand"])
+    return (" AND " + " AND ".join(clauses) if clauses else ""), params
+
+
+def list_categories() -> list[dict]:
+    """Return locally available top-level categories and product counts."""
+    with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as connection:
+        rows = connection.execute(
+            "SELECT split_part(raw_source->>'ground_truth_category', ' > ', 1),count(*) "
+            "FROM products WHERE NULLIF(raw_source->>'ground_truth_category','') IS NOT NULL "
+            "GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+    return [{"name": name, "count": count} for name, count in rows]

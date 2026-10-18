@@ -11,6 +11,11 @@ from .workflow import build_recommendation_agent, run_recommendation_turn
 def _show(state: dict) -> None:
     """Print the current query context and ranked product candidates."""
     recommendations = state.get("recommendations", [])
+    print(state.get("message", ""))
+    if state.get("status") == "categories":
+        for category in state.get("categories", []):
+            print(f"- {category['name']} ({category['count']})")
+        return
     print(f"\nContext: {state.get('query_context') or '(selected examples only)'}")
     for index, item in enumerate(recommendations, start=1):
         print(
@@ -33,7 +38,9 @@ def main() -> None:
     agent = build_recommendation_agent()
     print("Recommender session started. Enter a request, /select N, /refine TEXT, /reset, or /quit.")
     print(f"Session: {args.thread_id}")
-    previous_results: list[dict] = []
+    initial = run_recommendation_turn(agent, thread_id=args.thread_id, turn={})
+    _show(initial)
+    previous_results: list[dict] = initial.get("recommendations", [])
     while True:
         try:
             line = input("you> ").strip()
@@ -55,6 +62,8 @@ def main() -> None:
         if line.startswith("/select "):
             try:
                 selected_index = int(line.removeprefix("/select ").strip())
+                if selected_index < 1:
+                    raise ValueError("Result positions start at 1")
                 selected_id = previous_results[selected_index - 1]["id"]
             except (ValueError, IndexError):
                 print("Choose a result number from the most recent list, such as /select 2.")

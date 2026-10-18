@@ -25,7 +25,7 @@ docker compose up -d --build web
 
 This builds the UI image and starts the Compose service.
 
-Open `http://localhost:3000`. Compose publishes the UI only on localhost. The Next.js rewrite forwards `/api/*` requests from the web container to FastAPI at `host.docker.internal:8000`; FastAPI binds to the host interfaces so Docker Desktop can reach it. The first request still needs the text embedding model reachable through Ollama. The browser will show an explicit error if the database or embedding service is unavailable.
+Open `http://localhost:3000`. Compose publishes the UI only on localhost. The local browser calls FastAPI directly at `127.0.0.1:8000`. FastAPI binds only to loopback and allows browser requests from localhost/127.0.0.1 port 3000. The web container serves the UI without proxying session data. The first request still needs the text embedding model reachable through Ollama. The browser will show an explicit error if the database or embedding service is unavailable.
 
 To stop the UI container, run `docker compose stop web`. To develop locally, run `cd src/ui; npm.cmd install; npm.cmd run dev`; local development keeps the default API target at `127.0.0.1:8000`.
 
@@ -38,3 +38,10 @@ To stop the UI container, run `docker compose stop web`. To develop locally, run
 - The service serves only local saved images; source-hosted remote images are not fetched by the browser.
 
 The component catalog and operations are defined in [`catalog.tsx`](../src/ui/app/catalog.tsx), [`a2ui.py`](../src/agent/a2ui.py), and the UI orchestration in [`page.tsx`](../src/ui/app/page.tsx).
+
+
+## Stateful LLM flow (2026-10-18)
+
+The browser now uses `/api/session` to create/resume a saved thread, `/api/discover` for category selections and `#buynew`, `/api/recommend` for continuing conversation and selected examples, and `/api/cart` for explicit cart mutations. All turns use PostgreSQL session snapshots. The query box remains available after recommendations. Categories come from the local database. Products use the existing A2UI gallery; category choices, preference tags, and cart controls are React UI.
+
+Earlier in-memory limits describe the previous prototype. Apply migration 002 before starting this version. Local Ollama `gemma3:4b` handles routing, summaries and vision; no hosted inference is configured. Initial category display and explicit cart actions do not require a language model. See [README configuration](../README.md#llm-recommendation-workflow-2026-10-18).

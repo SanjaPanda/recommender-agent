@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { A2UIProvider } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/core/A2UIProvider.mjs";
 import * as A2UIRendererExports from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/core/A2UIRenderer.mjs";
 import { useA2UI } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/hooks/useA2UI.mjs";
@@ -12,98 +12,99 @@ const A2UIRenderer = (A2UIRendererExports as unknown as {
 }).default;
 
 type AgentResponse = {
-  thread_id: string;
-  a2ui_surface_id: string;
-  query_context: string;
-  selected_product_ids: string[];
-  products: Product[];
-  status: string;
+  thread_id: string; a2ui_surface_id: string; products: Product[];
+  selected_product_ids: string[]; status: string; message: string;
+  categories: { name: string; count: number }[];
+  cart: { id: string; title: string }[];
+  preferences: { requirement: string; strength: string }[];
+  filters: { brand?: string | null; is_secondhand?: boolean | null; category_prefixes?: string[] };
   a2ui_operations: A2UIMessage[];
 };
 
 function RecommendationApp() {
   const [query, setQuery] = useState("");
-  const [refinement, setRefinement] = useState("");
   const [session, setSession] = useState<AgentResponse | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [heading, setHeading] = useState("");
+  const initialized = useRef(false);
   const { processMessages } = useA2UI();
-  const gallery = useMemo(() => Boolean(session?.a2ui_operations?.length), [session]);
 
   async function submit(path: string, payload: object) {
-    setBusy(true);
-    setError("");
+    setBusy(true); setError("");
     try {
-      const response = await fetch(path, {
+      const response = await fetch(`http://127.0.0.1:8000${path}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "The recommender could not complete that request.");
+      if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : "Unable to complete this request.");
       processMessages(body.a2ui_operations);
-      setHeading(body.a2ui_operations.find((item: A2UIMessage) => item.updateDataModel)?.updateDataModel?.value?.heading ?? "Products");
-      setSession(body);
-      setSelected([]);
+      setSession(body); setSelected(body.selected_product_ids ?? []);
+      localStorage.setItem("recommender-thread", body.thread_id);
+      setQuery("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The recommender could not complete that request.");
-    } finally {
-      setBusy(false);
-    }
+      setError(cause instanceof Error ? cause.message : "Unable to complete this request.");
+    } finally { setBusy(false); }
   }
 
-  function discover(event: React.FormEvent) {
+  useEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+    void submit("/api/session", { thread_id: localStorage.getItem("recommender-thread") });
+  }, []);
+
+  function chat(event: React.FormEvent) {
     event.preventDefault();
-    if (!query.trim()) return;
-    void submit("/api/discover", { query: query.trim() });
+    if (!session || (!query.trim() && !selected.length)) return;
+    void submit("/api/recommend", { thread_id: session.thread_id,
+      selected_product_ids: selected, refinement: query.trim() });
   }
 
-  function finalize(event: React.FormEvent) {
-    event.preventDefault();
-    if (!session) return;
-    void submit("/api/recommend", {
-      thread_id: session.thread_id,
-      selected_product_ids: selected,
-      refinement: refinement.trim(),
-    });
+  function toggle(id: string) {
+    setSelected(current => current.includes(id) ? current.filter(x => x !== id) : current.length < 3 ? [...current, id] : current);
   }
 
-  function toggle(productId: string) {
-    setSelected((current) => current.includes(productId)
-      ? current.filter((id) => id !== productId)
-      : current.length < 3 ? [...current, productId] : current);
+  function cart(action: "cart_add" | "cart_remove", id: string) {
+    if (session) void submit("/api/cart", { thread_id: session.thread_id, action, product_ids: [id] });
   }
 
-  return (
-    <main className="page-shell">
-      <header className="topbar"><a className="wordmark" href="#">fieldnote<span>®</span></a><span className="top-note">PRODUCT DISCOVERY, WITH CONTEXT</span></header>
-      <section className="hero">
-        <div className="eyebrow"><i /> YOUR NEXT GOOD FIND</div>
-        <h1>Good things,<br /><em>found thoughtfully.</em></h1>
-        <p className="intro">Describe what you have in mind. Pick a few things that feel right. We’ll use both to find your next favorite.</p>
-        <form className="search-box" onSubmit={discover}>
-          <label htmlFor="query">WHAT ARE YOU LOOKING FOR?</label>
-          <div className="search-row"><input id="query" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. lightweight tools for a small garden" maxLength={1000} />
-            <button className="dark-button" disabled={busy || !query.trim()}>{busy && !session ? "Finding…" : "Find my starting point"}<span aria-hidden>↗</span></button></div>
-        </form>
-      </section>
-
-      {gallery && <section className="results" aria-live="polite">
-        <ProductActions.Provider value={{ selected, recommendations: heading === "Recommended for you", toggle }}>
-          <A2UIRenderer surfaceId={session!.a2ui_surface_id} fallback={<p className="busy-line">Loading product cards…</p>} />
-        </ProductActions.Provider>
-        {heading !== "Recommended for you" && <form className="refine-panel" onSubmit={finalize}>
-          <div className="refine-copy"><div className="eyebrow">MAKE IT MORE YOU</div><h2>What should we look for?</h2><p>Select up to three examples, then add any details that matter.</p></div>
-          <textarea value={refinement} onChange={(e) => setRefinement(e.target.value)} placeholder="A color, material, size, use case, or anything else…" maxLength={1000} />
-          <div className="submit-row"><span>We’ll combine your examples with your description.</span><button className="dark-button" disabled={busy || (!selected.length && !refinement.trim())}>{busy ? "Finding matches…" : "Finalize and recommend"}<span aria-hidden>↗</span></button></div>
-        </form>}
+  return <main className="page-shell">
+    <header className="topbar"><a className="wordmark" href="#">fieldnote</a><span className="top-note">PRODUCT DISCOVERY, WITH CONTEXT</span></header>
+    <section className="hero">
+      <h1>Good things,<br /><em>found thoughtfully.</em></h1>
+      <p className="intro">Describe your next find, choose examples, and refine what matters.</p>
+      {session && <button disabled={busy} onClick={() => void submit("/api/discover", { thread_id: session.thread_id, query: "#buynew" })}>Start a new search</button>}
+      {session?.status === "categories" && <section aria-label="Product categories" className="category-list">
+        {session.categories.map(category => <button key={category.name} disabled={busy}
+          onClick={() => void submit("/api/discover", { thread_id: session.thread_id, query: `Show products in ${category.name}` })}>
+          {category.name} ({category.count})</button>)}
       </section>}
-
-      {busy && session && <div className="busy-line"><span /> Updating your recommendations…</div>}
-      {error && <p className="error-message" role="alert">{error}</p>}
-      <footer><span>Made for the way you look.</span><span>LOCAL CATALOGUE · PRIVATE BY DESIGN</span></footer>
-    </main>
-  );
+      <form className="search-box" onSubmit={chat}>
+        <label htmlFor="query">WHAT ARE YOU LOOKING FOR?</label>
+        <div className="search-row"><input id="query" value={query} onChange={e => setQuery(e.target.value)}
+          placeholder="Describe a product or refine your preferences" maxLength={1000} />
+          <button className="dark-button" disabled={busy || !session || (!query.trim() && !selected.length)}>{busy ? "Working..." : "Send"}</button></div>
+      </form>
+      {selected.length > 0 && <p>{selected.length} visual example(s) active. <button disabled={busy} onClick={() => setSelected([])}>Clear examples</button></p>}
+      {session && <div aria-label="Active preferences">
+        {session.filters?.brand && <span className="preference-tag">Brand: {session.filters.brand}</span>}
+        {session.filters?.is_secondhand != null && <span className="preference-tag">{session.filters.is_secondhand ? "Secondhand" : "Brand new"}</span>}
+        {session.filters?.category_prefixes?.map(c => <span key={c} className="preference-tag">{c}</span>)}
+        {session.preferences?.map(p => <span key={p.requirement} className="preference-tag">{p.requirement} ({p.strength})</span>)}
+      </div>}
+    </section>
+    {session?.message && <p className="agent-message" aria-live="polite">{session.message}</p>}
+    {Boolean(session?.products.length) && <section className="results">
+      <ProductActions.Provider value={{ selected, recommendations: false, toggle, addToCart: id => cart("cart_add", id), busy }}>
+        <A2UIRenderer surfaceId={session!.a2ui_surface_id} fallback={<p>Loading products...</p>} />
+      </ProductActions.Provider>
+    </section>}
+    {session && <section className="cart-panel" aria-label="Shopping cart"><h2>Your cart ({session.cart.length})</h2>
+      {session.cart.length ? session.cart.map(p => <p key={p.id}>{p.title} <button disabled={busy} onClick={() => cart("cart_remove", p.id)}>Remove</button></p>) : <p>Your cart is empty.</p>}
+    </section>}
+    {error && <p className="error-message" role="alert">{error}</p>}
+    {!session && !busy && <button onClick={() => void submit("/api/session", { thread_id: localStorage.getItem("recommender-thread") })}>Reconnect</button>}
+  </main>;
 }
 
 export default function Home() {

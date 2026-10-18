@@ -6,8 +6,7 @@ RUN npm ci
 FROM node:20-alpine AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-ARG API_ORIGIN=http://127.0.0.1:8000
-ENV API_ORIGIN=${API_ORIGIN}
+ENV NODE_OPTIONS=--max-old-space-size=1024
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

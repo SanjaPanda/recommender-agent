@@ -1,5 +1,13 @@
 # Resume the next work session
 
+## Agent checkpoint (2026-10-18)
+
+The [finalized design](architecture.md#finalized-agent-design-2026-10-18) supersedes the older one-node workflow notes below. The implementation now has an LLM router, bounded retrieval, conditional preference verification, grounded summaries, explicit cart actions, and PostgreSQL session snapshots. These additions are present in the working tree; the historical checkpoints below are not a statement of current implementation completeness.
+
+Verification allows at most 40 model calls per pass and checks a 120-second elapsed-time budget. Each text or vision call receives the remaining time as its network timeout; verdicts arriving after the deadline become uncertain and no further calls start. This is a network timeout plus deadline checks, not forcible cancellation of server-side inference. Uncertain hard requirements never enter recommendations; soft preferences only affect ranking.
+
+Run `.venv/Scripts/python.exe -m unittest discover -s tests -v` for offline behavioral regression checks. Next, exercise the acceptance cases against the running PostgreSQL/Ollama/API stack, including persistence across API restarts and preference replacement/removal. Check current embedding coverage before evaluating the expanded apparel catalogue: the last recorded import checkpoint had 7,450 new products without vectors. Do not infer live model quality or catalogue coverage from mocked unit tests.
+
 The user expanded the scope on 2026-10-17 to include all Apparel & Accessories, Health & Beauty, Baby & Toddler, and Animals & Pet Supplies records across the train and test splits. Acquisition uses `.data/shopify-selected-train` and `.data/shopify-selected-test`. See the latest import status in [the scale-up checkpoint](scale-up-checkpoint.md). Preserve the original sample and Outdoor & Garden expansion (1,221 distinct products before this import). A previous 10,000-row Outdoor & Garden attempt was stopped after Hugging Face timed out; it did not replace existing data.
 
 ## Verified checkpoint (2026-10-17)

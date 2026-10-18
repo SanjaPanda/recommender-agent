@@ -33,10 +33,10 @@ The ignored `.env` file contains local database settings; `.env.example` documen
 
 The migration enables `vector` and creates product, embedding, session, and feedback tables. The importer upserts by deterministic source-row ID, so rerunning it updates the same records. Image bytes remain in local files; the database stores relative paths and hashes, not binary images.
 
-## Current setup (2026-10-17)
+## Current setup (2026-10-18)
 
 - PostgreSQL/pgvector is running in Docker Desktop. The database contains 8,671 distinct products, including all 7,483 Apparel & Accessories, Health & Beauty, Baby & Toddler, and Animals & Pet Supplies records from both source splits.
-- The original 1,221 products have 768-dimensional Nomic text vectors and 512-dimensional CLIP image vectors. The 7,450 newly added products have saved images but still need text and image embeddings before semantic and visual retrieval can return them.
+- All 8,671 products have validated 768-dimensional Nomic text vectors and 512-dimensional CLIP image vectors, including all 7,483 products in the four selected categories.
 - The 1,000-record Outdoor & Garden expansion saved 1,000 images (~182 MiB); end-to-end embedding time and missing-value counts are in the [scale-up checkpoint](docs/scale-up-checkpoint.md).
 - The catalogue has no documented price field, so price and budget filtering are unsupported.
 
@@ -96,3 +96,16 @@ uv run recommender-agent-chat --category-prefix "Home & Garden > Lawn & Garden"
 ```
 
 Enter a request, then use `/select 2` to get five similar products from the second result, `/refine lightweight and battery powered` to add a preference, `/reset` to clear the session, or `/quit` to exit. The workflow blends the selected product image vector with accumulated text context through the shared RAG pipeline. The default checkpoint is in memory and lasts only while the process runs. Physical attributes currently affect semantic ranking but are not yet extracted into hard constraints.
+
+
+## LLM recommendation workflow (2026-10-18)
+
+The [agent workflow](src/agent/workflow.py) now routes through SQL-only or filtered text/image retrieval, conditionally verifies preferences, and generates a grounded summary. There is no automatic retrieval refill loop. At most 20 candidates enter verification and at most five eligible products are displayed. Unknown hard requirements are excluded from verified results.
+
+Run `ollama pull gemma3:4b` once. Configure the local model settings shown in [.env.example](.env.example), apply migrations with `uv run python scripts/db/apply_migrations.py`, then start `uv run recommender-agent-api` and `docker compose up -d --build web`. No hosted inference or external API key is needed for the configured Ollama path. The model download needs internet access; inference uses localhost. The 4B vision model may be slow on this 8 GB machine.
+
+The browser opens or resumes a PostgreSQL-backed session. `#buynew` clears shopping preferences and examples while preserving the cart. Selecting examples and adding to the cart are separate actions. Session IDs are stored in browser local storage; this remains a localhost prototype without user authentication or multi-user access control.
+
+Verification has a 40-call ceiling and stops starting calls after a 120-second budget; each in-flight model call has its own 120-second timeout. Remaining unresolved hard requirements stay uncertain. Model calls are not retried. A summary failure falls back to factual result counts, while a router failure returns an explicit error and preserves the previous saved session. Visual attributes are checked on demand and are not cached yet. Session persistence saves complete turns, not intermediate execution checkpoints.
+
+Run behavioral checks with `.venv/Scripts/python.exe -m unittest discover -s tests -v`. See the [finalized design](docs/architecture.md#finalized-agent-design-2026-10-18).

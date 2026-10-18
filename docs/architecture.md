@@ -4,7 +4,71 @@
 
 Build a local-first product discovery prototype over the Shopify Product Catalogue. Users describe needs in natural language, browse catalogue-backed product cards, refine results with feedback and supported filters, and compare a shortlist.
 
-The project uses a single stateful LangGraph workflow with deterministic retrieval and filtering tools. It will not use Google ADK or a multi-agent design.
+The project uses a single stateful LangGraph workflow. The agreed next design adds an LLM router coordinating SQL and RAG components, conditional preference verification, and grounded summaries. These are bounded nodes or subgraphs within the workflow, not independently looping agents. See the finalized design and implementation notes below.
+
+## Finalized agent design (2026-10-18)
+
+Status: implemented as router, retrieval, conditional verifier, and response nodes. Session snapshots and cart state persist in PostgreSQL through migration 002. Local Ollama `gemma3:4b` is configured for routing, summaries, and vision; Nomic and CLIP remain the retrieval encoders. Visual attribute caching and arbitrary image uploads are not implemented.
+
+### Session and routing
+
+- A new session and the exact command `#buynew` show the categories available in the local database. `#buynew` resets the active shopping context and selected examples while preserving the cart.
+- An LLM router interprets the latest message and structured session state. It chooses category browsing, clarification, SQL-only retrieval, semantic/visual retrieval, combined retrieval, or explicit cart actions.
+- Persist session state in PostgreSQL: conversation context, category scope, structured filters, hard exclusions, soft preferences, selected product IDs, last displayed products, and cart contents.
+- Update preferences rather than concatenating every message. "Actually Adidas" replaces the brand; "also lightweight" adds a preference; "blue is fine" removes the blue exclusion. Ask a clarification when the intended change cannot be determined.
+
+### Retrieval contract
+
+- Pass validated structured filters to retrieval, never arbitrary LLM-generated SQL. Parameterized queries enforce category, brand, and `is_secondhand` constraints. Unknown condition does not satisfy an explicit request for brand-new products.
+- SQL-only requests return a bounded, deterministically ordered product set. RAG handles descriptive text, selected images, or both. Combined requests apply the SQL constraints inside each vector query before candidate limits and ranking.
+- Reuse stored image vectors for selected catalogue products, retaining the existing maximum of three examples and excluding those seeds from recommendations. Uploaded images require a separate ingestion path and are not implied by existing support.
+- Start with a configurable pool of 20 unique candidates and display at most five final products. This is an initial operating limit, not a calibrated ranking parameter.
+- Nomic text vectors and CLIP image vectors remain separate; combine their rankings rather than mixing vectors from different embedding spaces.
+
+### Conditional preference verification
+
+Run verification only when active session preferences require checks beyond constraints already enforced reliably by SQL. An empty preference list, or a list fully resolved by SQL, skips this node.
+
+1. Check reliable stored product attributes and supporting product text.
+2. Inspect candidate images with a vision-capable model only for unresolved visually observable attributes. Distinguish the product from its background and accessories.
+3. Return structured evidence per product and preference: `matches`, `violates`, or `uncertain`. Missing information stays unknown; vision cannot establish nonvisual properties such as actual material composition or condition history reliably.
+4. Exclude hard-constraint violations. Keep uncertain products separate from verified recommendations. Soft preferences affect ranking rather than eligibility.
+
+For "no blue clothes", exclude confirmed visible blue on the garment, including multicolored garments. Do not treat a blue background as a violation. Cached extracted attributes should retain evidence, provenance, and model version; model confidence alone does not make an attribute verified.
+
+Verification makes one bounded pass over the candidate pool. **There is no automatic refill or retrieval retry loop.** Return fewer than five verified products, or none, with a clear explanation when necessary. A later user message can initiate a new retrieval. Any future refill policy must have an explicit attempt cap and is outside this design.
+
+### Ranking, response, and cart
+
+- Rank eligible candidates using relevance and soft preferences. Ranking and summarization cannot reintroduce excluded products or silently relax hard constraints.
+- Generate summaries from retrieved product facts and verification evidence. Do not invent prices, availability, or unsupported attributes. Price filtering remains unsupported by this catalogue.
+- Render validated category choices, product cards, and cart actions through A2UI when needed; clarification and explanatory replies can be text-only.
+- Persist cart additions/removals only for explicit user actions and validated product IDs. Selecting a visual example is not an add-to-cart action. The cart is a tracker, not checkout or inventory reservation.
+
+### Flow
+
+```text
+User message or UI action
+  -> Router + persistent session state
+     -> New session / #buynew: category choices
+     -> Clarification: text response
+     -> Cart action: update tracker and acknowledge
+     -> SQL-only / RAG / SQL-filtered RAG: bounded candidates
+        -> Conditional preference verifier (one pass)
+        -> Rank eligible products
+        -> Grounded summary + A2UI when needed
+```
+
+### Acceptance cases
+
+- New session and `#buynew` show local categories; reset preserves the cart.
+- Brand-only and condition-only requests use SQL; descriptive requests use RAG; combined requests preserve all SQL constraints across both modalities.
+- Preferences survive turns and API restarts; replacements and removals do not leave stale constraints active.
+- No unresolved preference means no vision call. "No blue" excludes confirmed blue garments and separates uncertainty; "prefer black" influences order.
+- Fewer than five qualifying candidates produces fewer cards with no automatic retrieval loop. Verifier failure does not label unchecked products as verified.
+- Selected examples do not enter the cart without an explicit action. Summaries and cards reference only returned catalogue records.
+
+Implementation entry points: [workflow](../src/agent/workflow.py), [retrieval](../src/rag/retrieval.py), [API](../src/agent/api.py), and [A2UI operations](../src/agent/a2ui.py).
 
 ## Phase 1 workspace and environment
 

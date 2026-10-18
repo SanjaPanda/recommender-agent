@@ -95,7 +95,7 @@ This guide describes the planned build sequence for the local-first product disc
 
 ## Cross-phase decisions
 
-- Use one LangGraph workflow, not a multi-agent architecture.
+- Use one LangGraph workflow with an LLM router and bounded SQL/RAG components, conditional preference verification, and grounded summaries, as specified in the [finalized agent design](architecture.md#finalized-agent-design-2026-10-18). No automatic retrieval refill loop.
 - Keep the catalogue sample bounded and configurable while iterating.
 - Keep model names, vector dimensions, and retrieval weights configurable and recorded.
 - Do not claim price or budget filtering without a verified price source.
