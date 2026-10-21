@@ -5,7 +5,7 @@ import { A2UIProvider } from "../node_modules/@copilotkit/a2ui-renderer/dist/rea
 import * as A2UIRendererExports from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/core/A2UIRenderer.mjs";
 import { useA2UI } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/hooks/useA2UI.mjs";
 import { catalog, ProductActions } from "./catalog";
-import type { A2UIMessage, Product } from "./a2ui";
+import type { A2UIMessage, AgentTraceEvent, Product } from "./a2ui";
 
 const A2UIRenderer = (A2UIRendererExports as unknown as {
   default: ComponentType<{ surfaceId: string; fallback?: ReactNode }>;
@@ -14,12 +14,16 @@ const A2UIRenderer = (A2UIRendererExports as unknown as {
 type AgentResponse = {
   thread_id: string; a2ui_surface_id: string; products: Product[];
   selected_product_ids: string[]; status: string; message: string;
+  query_context: string;
   categories: { name: string; count: number }[];
   cart: { id: string; title: string }[];
   preferences: { requirement: string; strength: string }[];
-  filters: { brand?: string | null; is_secondhand?: boolean | null; category_prefixes?: string[] };
+  filters: { brand?: string | null; is_secondhand?: boolean | null; category_prefixes?: string[]; title_color?: string | null; title_product?: string | null };
+  trace: AgentTraceEvent[];
   a2ui_operations: A2UIMessage[];
 };
+
+const EXAMPLE_SEARCHES = ["Blue clothes", "Black cotton dress", "Pink bow tie"];
 
 function RecommendationApp() {
   const [query, setQuery] = useState("");
@@ -73,11 +77,11 @@ function RecommendationApp() {
     <section className="hero">
       <h1>Good things,<br /><em>found thoughtfully.</em></h1>
       <p className="intro">Describe your next find, choose examples, and refine what matters.</p>
-      {session && <button disabled={busy} onClick={() => void submit("/api/discover", { thread_id: session.thread_id, query: "#buynew" })}>Start a new search</button>}
-      {session?.status === "categories" && <section aria-label="Product categories" className="category-list">
-        {session.categories.map(category => <button key={category.name} disabled={busy}
-          onClick={() => void submit("/api/discover", { thread_id: session.thread_id, query: `Show products in ${category.name}` })}>
-          {category.name} ({category.count})</button>)}
+      {session && <button className="new-session-button" disabled={busy} onClick={() => void submit("/api/session", {})}>New session</button>}
+      {session?.status === "categories" && <section aria-label="Example searches" className="example-searches">
+        <p>Try a search</p>
+        <div>{EXAMPLE_SEARCHES.map(example => <button key={example} disabled={busy}
+          onClick={() => void submit("/api/discover", { query: example })}>{example}</button>)}</div>
       </section>}
       <form className="search-box" onSubmit={chat}>
         <label htmlFor="query">WHAT ARE YOU LOOKING FOR?</label>
@@ -86,14 +90,27 @@ function RecommendationApp() {
           <button className="dark-button" disabled={busy || !session || (!query.trim() && !selected.length)}>{busy ? "Working..." : "Send"}</button></div>
       </form>
       {selected.length > 0 && <p>{selected.length} visual example(s) active. <button disabled={busy} onClick={() => setSelected([])}>Clear examples</button></p>}
-      {session && <div aria-label="Active preferences">
-        {session.filters?.brand && <span className="preference-tag">Brand: {session.filters.brand}</span>}
-        {session.filters?.is_secondhand != null && <span className="preference-tag">{session.filters.is_secondhand ? "Secondhand" : "Brand new"}</span>}
-        {session.filters?.category_prefixes?.map(c => <span key={c} className="preference-tag">{c}</span>)}
-        {session.preferences?.map(p => <span key={p.requirement} className="preference-tag">{p.requirement} ({p.strength})</span>)}
-      </div>}
+      {session && session.status !== "categories" && <section className="search-applied" aria-label="Search applied">
+        <strong>Search applied</strong>
+        <p><span>Search:</span> {session.query_context || "Selected visual examples"}</p>
+        <p><span>Catalog:</span> Apparel &amp; Accessories</p>
+        {session.filters?.category_prefixes?.map(c => <p key={c}><span>Category:</span> {c}</p>)}
+        {session.filters?.brand && <p><span>Brand:</span> {session.filters.brand}</p>}
+        {session.filters?.is_secondhand != null && <p><span>Condition:</span> {session.filters.is_secondhand ? "Secondhand" : "Brand new"}</p>}
+        {session.filters?.title_product && <p><span>Product:</span> {session.filters.title_product}</p>}
+        {session.filters?.title_color && <p><span>Title color:</span> {session.filters.title_color}</p>}
+        {session.preferences?.map(p => <p key={p.requirement}><span>Preference:</span> {p.requirement} ({p.strength})</p>)}
+        {session.selected_product_ids.length > 0 && <p><span>Visual examples:</span> {session.selected_product_ids.length} selected</p>}
+      </section>}
     </section>
-    {session?.message && <p className="agent-message" aria-live="polite">{session.message}</p>}
+    {session?.message && <p className="agent-message" aria-live="polite">{session.status === "categories" ? "Choose an example or describe what you want to find." : session.message}</p>}
+    {Boolean(session?.trace.length) && <details className="agent-trace">
+      <summary>Agent trace ({session!.trace.length} steps)</summary>
+      <ol>{session!.trace.map((event, index) => <li key={`${event.node}-${index}`}>
+        <span><strong>{event.node}</strong>{event.route ? ` → ${event.route}` : ""}{event.status ? ` · ${event.status}` : ""}</span>
+        <small>{event.duration_ms} ms{event.result_count != null ? ` · ${event.result_count} products` : ""}{event.category_count != null ? ` · ${event.category_count} categories` : ""}{event.text_count != null ? ` · text ${event.text_count}` : ""}{event.clip_count != null ? ` · CLIP ${event.clip_count}` : ""}{event.example_count ? ` · examples ${event.example_count}` : ""}</small>
+      </li>)}</ol>
+    </details>}
     {Boolean(session?.products.length) && <section className="results">
       <ProductActions.Provider value={{ selected, recommendations: false, toggle, addToCart: id => cart("cart_add", id), busy }}>
         <A2UIRenderer surfaceId={session!.a2ui_surface_id} fallback={<p>Loading products...</p>} />

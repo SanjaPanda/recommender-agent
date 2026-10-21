@@ -1,7 +1,10 @@
 """LLM routing and bounded retrieval with durable turn snapshots."""
 from __future__ import annotations
 
-from typing import Any, TypedDict
+import logging
+import re
+from time import perf_counter
+from typing import Any, Callable, TypedDict
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -10,9 +13,19 @@ from langgraph.graph import END, START, StateGraph
 from .config import settings
 from rag.retrieval import APPAREL_CATEGORY, list_categories, retrieve_products
 from .llm import ModelError, complete
-from .models import ExplanationRequest, Plan, ProductFacts, ProductReference, RouterRequest, Summary, TurnEdits
+from .models import AgentTraceEvent, ExplanationRequest, Plan, ProductFacts, ProductReference, RouterRequest, Summary, TurnEdits
 from .edits import apply_edits
-from .refinements import color_refinement
+from .refinements import COLORS, color_refinement
+from .relevance import is_relevant_product
+
+logger = logging.getLogger(__name__)
+ROUTER_EDIT_CUES = re.compile(
+    r"\b(?:actually|instead|also|remove|clear|change|switch|replace|add|prefer|"
+    r"without|except|exclude|no|not|never|don't|dont|any|keep|same|new|used|secondhand|"
+    r"second-hand|brand|cart|under|budget|price|cost|cheaper|expensive|"
+    r"condition|sort|rank|narrow|broaden|reset)\b",
+    re.IGNORECASE,
+)
 
 
 class RecommendationState(TypedDict, total=False):
@@ -31,6 +44,8 @@ class RecommendationState(TypedDict, total=False):
     message: str
     route: str
     excluded_count: int
+    trace: list[AgentTraceEvent]
+    result_kind: str
 
 
 def _route(state: RecommendationState) -> dict:
@@ -76,6 +91,11 @@ def _route(state: RecommendationState) -> dict:
         plan = explicit_refinement
     elif not text:
         plan = Plan.model_validate({**old, 'intent': 'recommend'})
+    elif _can_pass_plain_search(text, Plan.model_validate(old)):
+        previous_plan = Plan.model_validate(old)
+        plan = previous_plan.model_copy(update={
+            'intent': 'recommend', 'query': text, 'message': '', 'product_ids': [],
+        })
     else:
         edits = complete(TurnEdits,
             'Route the latest shopping message and return ONLY explicit edits, not the full plan. '
@@ -154,12 +174,62 @@ def _route(state: RecommendationState) -> dict:
 
 
 def _retrieve(state: RecommendationState) -> dict:
-    """Retrieve five products using current preferences and SQL filters."""
+    """Return strong matches or closest alternatives within active SQL scope."""
     plan = Plan.model_validate(state['plan'])
     query = ' '.join(part for part in [plan.query, *(p.requirement for p in plan.preferences)] if part)
-    return {'candidates': retrieve_products(query_context=query,
-                selected_product_ids=state.get('selected_product_ids', []),
-                filters=plan.filters.model_dump(), limit=plan.result_limit), 'recommendations': []}
+    selected = state.get('selected_product_ids', [])
+    filters = plan.filters.model_dump()
+    if not query.strip() and not selected:
+        return {
+            'candidates': retrieve_products(
+                query_context=query, selected_product_ids=selected,
+                filters=filters, limit=plan.result_limit),
+            'recommendations': [], 'result_kind': 'browse',
+        }
+
+    # Rank a wider pool with the active filters. If no strong match survives,
+    # retry once without title color/type constraints for closest alternatives;
+    # category, brand, and condition remain hard in both searches.
+    pool = retrieve_products(
+        query_context=query,
+        selected_product_ids=selected,
+        filters=filters,
+        limit=max(plan.result_limit * 4, 20),
+    )
+    strong_matches = [
+        product for product in pool
+        if is_relevant_product(
+            product, query, has_visual_examples=bool(selected),
+            required_title_color=filters.get('title_color'),
+            required_product_type=filters.get('title_product'),
+        )
+    ]
+    if strong_matches:
+        return {
+            'candidates': strong_matches[:plan.result_limit], 'recommendations': [],
+            'result_kind': 'matches',
+        }
+
+    fallback_pool = pool
+    if filters.get('title_color') or filters.get('title_product'):
+        relaxed_filters = {**filters, 'title_color': None, 'title_product': None}
+        fallback_pool = retrieve_products(
+            query_context=query,
+            selected_product_ids=selected,
+            filters=relaxed_filters,
+            limit=max(plan.result_limit * 4, 20),
+        )
+    alternatives = [
+        product for product in fallback_pool
+        if is_relevant_product(
+            product, query, has_visual_examples=bool(selected),
+            ignore_query_attributes=True,
+        )
+    ][:plan.result_limit]
+    return {
+        'candidates': alternatives, 'recommendations': [],
+        'result_kind': 'fallback' if alternatives else 'none',
+    }
 
 
 def _respond(state: RecommendationState) -> dict:
@@ -168,10 +238,18 @@ def _respond(state: RecommendationState) -> dict:
         return {}
     plan = Plan.model_validate(state['plan'])
     products = state.get('candidates', [])[:plan.result_limit]
-    message = f'Found {len(products)} product(s).'
+    result_kind = state.get('result_kind', 'matches')
+    if result_kind == 'fallback':
+        message = 'Sorry, I could not find a strong match. Here are the closest alternatives in this category.'
+    elif result_kind == 'none':
+        message = 'Sorry, I could not find a strong match in this category.'
+    elif result_kind == 'browse':
+        message = f'Showing {len(products)} product(s) from this category.'
+    else:
+        message = f'Found {len(products)} strong match(es).'
     if state['plan'].get('preferences'):
         message += ' Preferences guide similarity search but are not verified; results may not satisfy every preference or exclusion.'
-    if plan.filters.title_color:
+    if plan.filters.title_color and result_kind != 'fallback':
         if plan.query:
             message += f' Matching {plan.query!r} with {plan.filters.title_color!r} in the catalogue title; image color is not verified.'
         else:
@@ -195,7 +273,8 @@ def _respond(state: RecommendationState) -> dict:
             message += ' ' + summary.message
         except ModelError:
             pass  # Valid catalogue cards remain usable without generated prose.
-    return {'recommendations': products, 'status': 'ok' if products else 'no_candidates', 'message': message,
+    status = 'fallback' if result_kind == 'fallback' else 'ok' if products else 'no_candidates'
+    return {'recommendations': products, 'status': status, 'message': message,
             'messages': [*state.get('messages', []), {'role': 'assistant', 'content': message}][-20:]}
 
 
@@ -203,12 +282,52 @@ def build_recommendation_agent(*, checkpointer: Any | None = None):
     """Build an acyclic graph with a durable snapshot around each complete turn."""
     graph = StateGraph(RecommendationState)
     for name, function in (('router', _route), ('retrieve', _retrieve), ('respond', _respond)):
-        graph.add_node(name, function)
+        graph.add_node(name, _trace_node(name, function))
     graph.add_edge(START, 'router')
     graph.add_conditional_edges('router', lambda s: s['route'], {'retrieve': 'retrieve', 'respond': 'respond'})
     graph.add_edge('retrieve', 'respond')
     graph.add_edge('respond', END)
     return graph.compile(checkpointer=checkpointer)
+
+
+def _trace_node(
+    name: str,
+    node: Callable[[RecommendationState], dict[str, Any]],
+) -> Callable[[RecommendationState], dict[str, Any]]:
+    """Time one graph node and attach only safe execution metadata.
+
+    User messages, prompts, product text, and model output are deliberately
+    omitted. A failed node is logged by name and duration, then re-raised.
+    """
+    def traced(state: RecommendationState) -> dict[str, Any]:
+        started = perf_counter()
+        try:
+            update = node(state)
+        except Exception as exc:
+            log = logger.info if isinstance(exc, ValueError) else logger.warning
+            log("agent_trace node=%s outcome=error error_type=%s duration_ms=%d",
+                name, type(exc).__name__, round((perf_counter() - started) * 1000))
+            raise
+        elapsed_ms = round((perf_counter() - started) * 1000)
+        candidate_rows = update.get("candidates", []) if name == "retrieve" else []
+        event = AgentTraceEvent(
+            node=name,
+            duration_ms=elapsed_ms,
+            route=update.get("route", state.get("route")) if name == "router" else None,
+            status=update.get("status", state.get("status")),
+            result_count=(len(update.get("candidates", [])) if name == "retrieve"
+                          else len(update.get("recommendations", [])) if name == "respond"
+                          else None),
+            category_count=len(update.get("categories", [])) if name == "router" else None,
+            text_count=sum(row.get("text_similarity") is not None for row in candidate_rows) if name == "retrieve" else None,
+            clip_count=sum(row.get("image_similarity") is not None for row in candidate_rows) if name == "retrieve" else None,
+            example_count=sum(row.get("example_similarity") is not None for row in candidate_rows) if name == "retrieve" else None,
+        )
+        logger.info("agent_trace node=%s duration_ms=%d route=%s status=%s result_count=%s",
+                    event.node, event.duration_ms, event.route, event.status, event.result_count)
+        return {**update, "trace": [*state.get("trace", []), event]}
+
+    return traced
 
 
 def sanitize_apparel_products(connection: psycopg.Connection, state: dict[str, Any]) -> dict[str, Any]:
@@ -248,6 +367,40 @@ def sanitize_apparel_products(connection: psycopg.Connection, state: dict[str, A
     return result
 
 
+def _is_plain_search(text: str) -> bool:
+    """Return whether text can be sent to retrieval without interpreting edits.
+
+    Plain product descriptions such as ``blue clothes`` skip the slow router
+    model. Words that commonly express filter changes, exclusions, conditions,
+    cart actions, or sorting retain the LLM path.
+    """
+    return bool(text.strip()) and ROUTER_EDIT_CUES.search(text) is None
+
+
+def _can_pass_plain_search(text: str, previous_plan: Plan) -> bool:
+    """Avoid the LLM only when a plain search cannot conflict with saved edits."""
+    if not _is_plain_search(text):
+        return False
+    if (previous_plan.filters.brand or previous_plan.filters.is_secondhand is not None
+            or previous_plan.filters.title_color or previous_plan.filters.title_product):
+        return False
+    query_colors = {
+        color for color in COLORS
+        if re.search(r"\b" + re.escape(color) + r"\b", text, re.IGNORECASE)
+    }
+    for preference in previous_plan.preferences:
+        excluded = {
+            match.group(1).casefold()
+            for match in re.finditer(
+                r"\b(?:not|no|without|never|exclude|avoid)\s+([a-z]+)\b",
+                preference.requirement, re.IGNORECASE,
+            )
+        }
+        if query_colors & excluded:
+            return False
+    return True
+
+
 def run_recommendation_turn(agent: Any, *, thread_id: str, turn: dict[str, Any]) -> dict[str, Any]:
     """Serialize each session and atomically save its context and cart after a turn."""
     if not thread_id.strip() or len(thread_id) > 128:
@@ -257,7 +410,9 @@ def run_recommendation_turn(agent: Any, *, thread_id: str, turn: dict[str, Any])
         connection.execute('INSERT INTO agent_sessions(thread_id) VALUES (%s) ON CONFLICT DO NOTHING', (thread_id,))
         previous = connection.execute('SELECT state FROM agent_sessions WHERE thread_id=%s FOR UPDATE', (thread_id,)).fetchone()[0]
         previous = sanitize_apparel_products(connection, previous)
-        state = agent.invoke({**previous, 'turn': turn}, config={'configurable': {'thread_id': thread_id}})
-        durable = {k: v for k, v in state.items() if k not in {'turn', 'candidates', 'uncertain', 'categories'}}
+        state = agent.invoke({**previous, 'turn': turn, 'trace': []},
+                             config={'configurable': {'thread_id': thread_id}})
+        durable = {k: v for k, v in state.items()
+                   if k not in {'turn', 'candidates', 'uncertain', 'categories', 'trace'}}
         connection.execute('UPDATE agent_sessions SET state=%s,updated_at=now() WHERE thread_id=%s', (Jsonb(durable), thread_id))
     return state

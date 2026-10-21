@@ -16,7 +16,7 @@ def color_refinement(previous: Plan, message: str) -> Plan | None:
     match = re.fullmatch(
         r'(?:(?:find|show|get)(?: me)? )?'
         r'(?:(?P<count>[1-5]|a|one|two|three|four|five)(?: ones?)? )?'
-        r'in (?P<color>' + '|'.join(COLORS) + r')', text)
+        r'(?:in )?(?P<color>' + '|'.join(COLORS) + r')', text)
     clear = text in {'any color', 'any colour', 'any color is fine', 'any colour is fine'}
     if not match and not clear:
         return None

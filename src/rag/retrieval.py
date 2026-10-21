@@ -86,7 +86,7 @@ def retrieve_products(
                     "id": row[0], "title": row[1], "description": row[2], "brand": row[3],
                     "category": row[4], "image_meta": row[5], "is_secondhand": row[6],
                     "score": 0.0, "text_similarity": None,
-                    "image_similarity": None,
+                    "image_similarity": None, "example_similarity": None,
                     "visual_source": "hybrid",
                 }
                 for row in rows
@@ -134,18 +134,19 @@ def retrieve_products(
                     excluded_ids=exclude_refs, limit=candidate_limit,
                 )
 
-    ranked_lists: list[tuple[list[tuple[Any, ...]], str, float]] = []
+    ranked_lists: list[tuple[list[tuple[Any, ...]], str, str, float]] = []
     if query_vector is not None:
         ranked_lists.extend([
-            (text_rows, "text", 0.50),
-            (clip_rows, "image", 0.50),
+            (text_rows, "text", "text_similarity", 0.50),
+            (clip_rows, "image", "image_similarity", 0.50),
         ])
     if example_rows:
-        ranked_lists.append((example_rows, "image", 0.20 if query_vector is not None else 1.0))
-    available_weight = sum(weight for rows, _, weight in ranked_lists if rows)
+        ranked_lists.append((example_rows, "image", "example_similarity",
+                             0.20 if query_vector is not None else 1.0))
+    available_weight = sum(weight for rows, _, _, weight in ranked_lists if rows)
 
     fused: dict[str, dict[str, Any]] = {}
-    for rows, modality, raw_weight in ranked_lists:
+    for rows, modality, score_key, raw_weight in ranked_lists:
         if not rows or not available_weight:
             continue
         weight = raw_weight / available_weight
@@ -154,10 +155,10 @@ def retrieve_products(
             product = fused.setdefault(product_id, {
                 "id": product_id, "title": title, "description": description, "brand": brand,
                 "category": category, "image_meta": image_meta, "is_secondhand": is_secondhand,
-                "image_similarity": None,
+                "image_similarity": None, "example_similarity": None,
                 "text_similarity": None, "score": 0.0, "visual_source": "hybrid",
             })
-            product[f"{modality}_similarity"] = float(similarity)
+            product[score_key] = float(similarity)
             product["score"] += weight / (60 + rank)
 
     def ranking_key(item: dict[str, Any]) -> tuple[bool, float]:

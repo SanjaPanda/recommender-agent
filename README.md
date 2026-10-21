@@ -31,7 +31,7 @@ uv run recommender-agent-api
 docker compose up -d --build web
 ```
 
-Open <http://localhost:3000>. The UI displays product cards, accepts visual selections, and lets the user refine preferences. `#buynew` starts a fresh apparel search while keeping the cart.
+Open <http://localhost:3000>. The UI displays relevance-gated product cards, accepts visual selections, lets the user refine preferences, and exposes a per-turn agent trace. If no strong products match, it explains that and shows the closest alternatives in the selected category. `#buynew` starts a fresh apparel search while keeping the cart.
 
 ## Dataset and database
 

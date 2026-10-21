@@ -12,6 +12,18 @@ export type Product = {
 
 export type A2UIMessage = Record<string, any>;
 
+export type AgentTraceEvent = {
+  node: "router" | "retrieve" | "respond";
+  duration_ms: number;
+  route?: string | null;
+  status?: string | null;
+  result_count?: number | null;
+  category_count?: number | null;
+  text_count?: number | null;
+  clip_count?: number | null;
+  example_count?: number | null;
+};
+
 export function readProductGallery(operations: A2UIMessage[]) {
   const update = operations.find((operation) => operation.updateDataModel)?.updateDataModel;
   const components = operations.find((operation) => operation.updateComponents)?.updateComponents?.components ?? [];

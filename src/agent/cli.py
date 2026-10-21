@@ -12,6 +12,16 @@ def _show(state: dict) -> None:
     """Print the current query context and ranked product candidates."""
     recommendations = state.get("recommendations", [])
     print(state.get("message", ""))
+    trace = state.get("trace", [])
+    if trace:
+        print("\nAgent trace:")
+        for event in trace:
+            print(f"- {event.node}: {event.duration_ms} ms"
+                  f" | route={event.route or '-'} | status={event.status or '-'}"
+                  f" | results={event.result_count if event.result_count is not None else '-'}"
+                  f" | text={event.text_count if event.text_count is not None else '-'}"
+                  f" | CLIP={event.clip_count if event.clip_count is not None else '-'}"
+                  f" | examples={event.example_count if event.example_count is not None else '-'}")
     if state.get("status") == "categories":
         for category in state.get("categories", []):
             print(f"- {category['name']} ({category['count']})")

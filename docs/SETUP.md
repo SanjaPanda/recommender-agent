@@ -72,4 +72,8 @@ Run a query through the same retrieval code as the agent:
 uv run recommender-search "blue cotton dress" --limit 5
 ```
 
-The first query in a new API process loads CLIP; later queries reuse its process-local cache. If CLIP files are unavailable, the agent warns and continues with product-text retrieval. Troubleshoot local services with `docker compose ps`, `ollama ps`, and `ollama list`.
+The first query in a new API process initializes local retrieval models; later queries reuse process-local caches. One same-process `blue clothes` check measured 81.45 seconds for cold retrieval and 2.332 seconds for the warm repeat. Both returned five strong matches with five text scores and five CLIP scores. The router took 137 ms cold and 73 ms warm; response took 25 ms and less than 1 ms. This is a single query pair, not a benchmark. If CLIP files are unavailable, the agent warns and continues with product-text retrieval. Troubleshoot local services with `docker compose ps`, `ollama ps`, and `ollama list`.
+
+Plain product searches such as `blue clothes` go directly to hybrid retrieval and do not wait for Gemma. Requests that look like preference/filter edits use the local router model. The UI displays an `Agent trace` panel with per-node times and result counts for each successful turn.
+
+The search gate returns only strong matches. It uses initial Nomic and CLIP similarity cutoffs of 0.61 and 0.28, plus exact catalog text checks for color/product terms. If no result qualifies, the UI says so and shows the closest alternatives within the selected category. These are starting thresholds from a small judged query sample and should be reviewed against real queries. The trace panel also shows the count of displayed products with text, CLIP, and example scores.

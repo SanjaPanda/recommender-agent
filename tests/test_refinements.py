@@ -40,6 +40,33 @@ class RefinementTests(unittest.TestCase):
             self.assertIsNone(color_refinement(self.old, text))
         self.assertIsNone(color_refinement(Plan(intent='categories'), 'find 1 in black'))
 
+    def test_bare_color_followup_keeps_multiword_product_query(self):
+        kids_clothes = Plan(intent='recommend', query='kids clothes', filters=Filters(
+            category_prefixes=['Apparel & Accessories > Clothing']))
+        blue = color_refinement(kids_clothes, 'blue')
+        self.assertIsNotNone(blue)
+        self.assertEqual(blue.query, 'kids clothes')
+        self.assertEqual(blue.filters.title_color, 'blue')
+        self.assertEqual(blue.filters.category_prefixes,
+                         ['Apparel & Accessories > Clothing'])
+
+    def test_bare_color_graph_turn_retrieves_with_preserved_product_context(self):
+        kids_clothes = Plan(intent='recommend', query='kids clothes', filters=Filters(
+            category_prefixes=['Apparel & Accessories > Clothing']))
+        product = {'id': 'blue-kids-shirt', 'title': 'Blue Kids Shirt'}
+        with patch('agent.workflow.list_categories', return_value=[{'name': 'Apparel & Accessories > Clothing'}]), \
+             patch('agent.workflow.complete') as model, \
+             patch('agent.workflow.retrieve_products', return_value=[product]) as retrieve:
+            state = build_recommendation_agent().invoke({
+                'plan': kids_clothes.model_dump(),
+                'turn': {'refinement': 'blue'},
+            })
+        model.assert_not_called()
+        self.assertEqual(retrieve.call_args.kwargs['query_context'], 'kids clothes')
+        self.assertEqual(retrieve.call_args.kwargs['filters']['title_color'], 'blue')
+        self.assertEqual(retrieve.call_args.kwargs['filters']['category_prefixes'],
+                         ['Apparel & Accessories > Clothing'])
+
     def test_graph_keeps_seed_and_cart_and_uses_one_filtered_result(self):
         product = {'id': 'black-leash', 'title': 'Black leash'}
         with patch('agent.workflow.list_categories', return_value=[{'name': 'Apparel & Accessories > Clothing'}]), \
@@ -51,7 +78,7 @@ class RefinementTests(unittest.TestCase):
         model.assert_not_called()
         self.assertEqual(retrieve.call_args.kwargs['query_context'], 'leash')
         self.assertEqual(retrieve.call_args.kwargs['selected_product_ids'], ['seed'])
-        self.assertEqual(retrieve.call_args.kwargs['limit'], 1)
+        self.assertEqual(retrieve.call_args.kwargs['limit'], 20)
         self.assertEqual(retrieve.call_args.kwargs['filters']['title_color'], 'black')
         self.assertEqual(state['recommendations'], [product])
         self.assertEqual(state['cart'], [{'id': 'cart'}])

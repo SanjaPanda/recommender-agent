@@ -32,9 +32,11 @@ const renderers: CatalogRenderers<typeof definitions> = {
     const actions = useContext(ProductActions);
     const products = Array.isArray(props.products) ? props.products as Product[] : [];
     const heading = typeof props.heading === "string" ? props.heading : "Products";
+    const eyebrow = heading === "Closest alternatives" ? "CLOSEST AVAILABLE OPTIONS"
+      : heading === "Recommended for you" ? "A BETTER FIT, FOUND" : "A GOOD PLACE TO START";
     const recommended = false;
     return <section className="a2ui-gallery">
-      <div className="section-head"><div><div className="eyebrow">{recommended ? "A BETTER FIT, FOUND" : "A GOOD PLACE TO START"}</div><h2>{heading}</h2></div>
+      <div className="section-head"><div><div className="eyebrow">{eyebrow}</div><h2>{heading}</h2></div>
         {!recommended && <span className="selection-count">{actions.selected.length}/3 selected</span>}</div>
       <div className="product-grid">{products.map((product, index) => {
         const active = actions.selected.includes(product.id);

@@ -108,6 +108,8 @@ def _response(
     """Build the JSON response and A2UI operations for one agent turn."""
     products = _serialize_products(state.get("recommendations", []))
     surface_id = f"product-recommendations-{thread_id}"
+    if state.get("result_kind") == "fallback":
+        heading = "Closest alternatives"
     return {
         "thread_id": thread_id,
         "a2ui_surface_id": surface_id,
@@ -121,6 +123,7 @@ def _response(
         "preferences": state.get("plan", {}).get("preferences", []),
         "filters": state.get("plan", {}).get("filters", {}),
         "uncertain_count": len(state.get("uncertain", [])),
+        "trace": [event.model_dump() for event in state.get("trace", [])],
         "a2ui_operations": product_gallery_operations(
             products, heading=heading, surface_id=surface_id, create_surface=create_surface
         ),

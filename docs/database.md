@@ -69,6 +69,36 @@ On 2026-10-21, after the approved catalog cleanup, ran `VACUUM (FULL, ANALYZE)` 
 
 ## Retiring image descriptions
 
-The active recommender no longer generates, stores, or retrieves image descriptions. PostgreSQL still has the old `image_description` and provenance columns, nullable structured image columns added by migration 007, and 124 caption vectors. The last live check before Docker became unavailable found every structured visual column NULL and 124 non-empty apparel descriptions with matching caption vectors. The description importer has not run since that check.
+The active recommender no longer generates, stores, or retrieves image descriptions. Migration `009_remove_image_descriptions.sql` ran on 2026-10-21 after a fresh backup and live schema/count inspection.
 
-Migration `009_remove_image_descriptions.sql` is staged. It deletes rows with modality `image_description`, narrows the embedding modality constraint to `text` and `image`, and drops the retired image-description columns. It preserves product rows and original images, text vectors, CLIP image vectors, sessions, and product attributes. Migration 008 was never applied and has been removed; dropping `image_components` is folded into migration 009. The migration is not yet applied: Docker PostgreSQL was offline at the time of this change. Before applying it, create and validate a fresh custom-format backup, inspect current table counts, caption-vector count, and non-null retired columns, then apply the migration and verify referential integrity and that product/text/CLIP counts are unchanged. Restore the backup to roll back if post-migration validation fails. Final after-counts and backup path must be recorded after execution.
+Before migration, the project database had 2,173 products, 4,470 embeddings (2,173 text, 2,173 CLIP image, 124 image-description), three agent sessions, zero feedback rows, zero legacy recommendation sessions, and seven migration records. All product roots were Apparel & Accessories; there were zero orphan embeddings. Products had 124 non-empty `image_description` values, 128 non-null provenance values, and zero populated structured visual fields. The one existing product-attributes record was retained.
+
+The verified custom-format backup is `.codex-work/backups/recommender_agent_pre_image_description_removal_20261021.dump` (15,480,979 bytes; SHA-256 `1421fdcbfba6a6f1c3212411e9351d299383fa60576c31197584648dfede7399`; `pg_restore --list` succeeded). This backup is the rollback path.
+
+Migration 009 deleted the 124 caption vectors, constrained embedding modalities to `text` and `image`, and dropped eight retired product columns: `image_description`, `image_description_meta`, `image_product_type`, `image_colours`, `image_pattern`, `image_components`, `image_object_count`, and `image_other_details`. It preserved products and source images, text and CLIP vectors, attributes, sessions, and all other tables/indexes.
+
+After migration, PostgreSQL reports:
+
+| Table or validation | Rows/result |
+|---|---:|
+| `products` | 2,173 |
+| `product_embeddings` | 4,346 (2,173 text + 2,173 image) |
+| `agent_sessions` | 3 |
+| `product_feedback` | 0 |
+| `recommendation_sessions` | 0 |
+| `schema_migrations` | 8 |
+| Orphan embeddings | 0 |
+| Products missing text vectors | 0 |
+| Products missing CLIP image vectors | 0 |
+| Non-apparel product roots | 0 |
+| Retired image-description columns remaining | 0 |
+| Populated product attributes | 1 (retained) |
+
+The live `blue cotton dress` retrieval smoke query returned five products with both text and CLIP scores after migration. The offline suite passed 51 tests. Averages and recommendation-quality improvement were not measured. Migration 008 was never applied; its `image_components` removal is included in migration 009.
+
+
+After migration, the idempotent ingestion rerun upserted 2,173 records and left products at 2,173 and embeddings at 4,346 (2,173 each text and image). A post-migration browser smoke check added one agent session; the current gent_sessions count is 4. Product, embedding, apparel-root, and retired-column checks remained unchanged. The UI displayed five products for the Clothing category, narrowed to five title-matched black products, and accepted a selected visual example.
+
+
+The ingestion/UI validation created a fourth gent_sessions row; current counts are 2,173 products and 4,346 embeddings. VACUUM (ANALYZE) product_embeddings cleared the 124 dead caption-vector tuple versions (
+_dead_tup=0). PostgreSQL-reported database size was 37,205,683 bytes immediately before vacuum and 36,746,931 bytes after; the embeddings relation changed from 16,916,480 to 16,441,344 bytes. These are observed storage counters, not a benchmark or application performance result.

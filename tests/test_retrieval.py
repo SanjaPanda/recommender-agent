@@ -40,6 +40,39 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["image_similarity"], 0.9)
         self.assertNotIn("image_description_similarity", results[0])
 
+    def test_selected_example_score_does_not_replace_query_image_score(self):
+        connection = MagicMock()
+        image_searches = 0
+
+        def execute(sql, params):
+            """Return distinct scores for the example and query-image rankings."""
+            nonlocal image_searches
+            if "SELECT e.product_id,e.embedding::real[]" in sql:
+                return MagicMock(fetchall=lambda: [("example-1", [1.0, 0.0])])
+            modality = params[2]
+            similarity = 0.7
+            if modality == "image":
+                image_searches += 1
+                similarity = 0.93 if image_searches == 1 else 0.25
+            return MagicMock(fetchall=lambda: [(
+                "shirt-1", "Blue Cotton Shirt", "Cotton shirt", "Example",
+                "Apparel & Accessories > Clothing", {"local_path": "shirt.jpg"},
+                False, similarity,
+            )])
+
+        connection.execute.side_effect = execute
+        with patch("rag.retrieval.psycopg.connect") as connect, \
+             patch("rag.retrieval.register_vector"), \
+             patch("rag.retrieval.embed_texts", return_value=[[0.0, 1.0]]), \
+             patch("rag.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
+            connect.return_value.__enter__.return_value = connection
+            results = retrieve_products(
+                query_context="blue cotton shirt", selected_product_ids=["example-1"])
+
+        self.assertEqual(image_searches, 2)
+        self.assertEqual(results[0]["image_similarity"], 0.25)
+        self.assertEqual(results[0]["example_similarity"], 0.93)
+
 
 if __name__ == "__main__":
     unittest.main()

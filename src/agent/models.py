@@ -9,6 +9,20 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AgentTraceEvent(BaseModel):
+    """Safe summary of one completed LangGraph node, without prompt contents."""
+
+    node: Literal["router", "retrieve", "respond"] = Field(description="LangGraph node that completed.")
+    duration_ms: int = Field(ge=0, description="Node wall time in milliseconds.")
+    route: str | None = Field(default=None, description="Router branch selected, when applicable.")
+    status: str | None = Field(default=None, description="Validated shopping workflow status, when available.")
+    result_count: int | None = Field(default=None, ge=0, description="Candidate or recommendation count produced by the node.")
+    category_count: int | None = Field(default=None, ge=0, description="Available category count returned by the router node.")
+    text_count: int | None = Field(default=None, ge=0, description="Displayed candidates with a product-text score.")
+    clip_count: int | None = Field(default=None, ge=0, description="Displayed candidates with a query-to-image CLIP score.")
+    example_count: int | None = Field(default=None, ge=0, description="Displayed candidates with a selected-example CLIP score.")
+
+
 class Filters(Contract):
     """Only catalogue-backed hard SQL constraints."""
     title_product: str | None = Field(default=None, max_length=100, description="Single product type matched against the main product title.")

@@ -7,11 +7,14 @@ from agent.models import ExplanationRequest, Summary, Filters, Plan, ProductFact
 from agent.llm import ModelError
 from agent.config import Settings, settings
 from pydantic import ValidationError
-from agent.workflow import build_recommendation_agent, sanitize_apparel_products
+from agent.workflow import _is_plain_search, build_recommendation_agent, sanitize_apparel_products
 from rag.retrieval import filter_clause
 
 CATEGORIES = [{'name': 'Apparel & Accessories', 'count': 10}]
-PRODUCT = {'id': 'one', 'title': 'Red shirt', 'description': 'Cotton shirt', 'score': 1.0}
+PRODUCT = {
+    'id': 'one', 'title': 'Red shirt', 'description': 'Cotton shirt', 'score': 1.0,
+    'text_similarity': 0.65, 'image_similarity': 0.30, 'example_similarity': None,
+}
 
 
 class AgentTests(unittest.TestCase):
@@ -105,6 +108,48 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(state['recommendations'], [PRODUCT])
         self.assertEqual(retrieve.call_args.kwargs['filters']['category_prefixes'],
                          ['Apparel & Accessories > Clothing'])
+        self.assertEqual([event.node for event in state['trace']],
+                         ['router', 'retrieve', 'respond'])
+        self.assertEqual(state['trace'][1].text_count, 1)
+        self.assertEqual(state['trace'][1].clip_count, 1)
+        self.assertEqual(state['trace'][1].example_count, 0)
+        self.assertEqual(state['trace'][1].result_count, 1)
+        self.assertTrue(all(event.duration_ms >= 0 for event in state['trace']))
+
+    @patch('agent.workflow.list_categories', return_value=CATEGORIES)
+    def test_plain_product_search_skips_router_and_preserves_context(self, _):
+        previous = Plan(
+            intent='recommend',
+            filters=Filters(category_prefixes=['Apparel & Accessories > Clothing']),
+            preferences=[{'requirement': 'cotton'}],
+        )
+        displayed = [PRODUCT, {**PRODUCT, 'id': 'two', 'title': 'Blue shirt'}]
+        with patch('agent.workflow.complete') as model, \
+             patch('agent.workflow.retrieve_products', return_value=displayed) as retrieve:
+            state = build_recommendation_agent().invoke({
+                'plan': previous.model_dump(), 'recommendations': displayed,
+                'selected_product_ids': ['one'],
+                'turn': {'query': 'blue clothes', 'selected_product_ids': ['one']},
+            })
+
+        model.assert_not_called()
+        self.assertEqual(state['plan']['query'], 'blue clothes')
+        self.assertEqual(state['plan']['filters']['category_prefixes'],
+                         ['Apparel & Accessories > Clothing'])
+        self.assertEqual(retrieve.call_args.kwargs['query_context'], 'blue clothes cotton')
+        self.assertEqual(retrieve.call_args.kwargs['selected_product_ids'], ['one'])
+        self.assertEqual([event.node for event in state['trace']],
+                         ['router', 'retrieve', 'respond'])
+        self.assertEqual(state['trace'][1].text_count, 2)
+        self.assertEqual(state['trace'][1].clip_count, 2)
+        self.assertEqual(state['trace'][1].example_count, 0)
+
+    def test_preference_edit_cues_keep_the_model_router(self):
+        self.assertTrue(_is_plain_search('blue clothes'))
+        self.assertTrue(_is_plain_search('show me a blue jacket'))
+        self.assertFalse(_is_plain_search('no blue'))
+        self.assertFalse(_is_plain_search('remove the black filter'))
+        self.assertFalse(_is_plain_search('blue clothes without stripes'))
 
     @patch('agent.workflow.list_categories', return_value=[])
     def test_ui_category_selection_rejects_non_apparel_path(self, _):
@@ -183,7 +228,7 @@ class AgentTests(unittest.TestCase):
         model.assert_called_once()
         retrieve.assert_called_once()
         self.assertEqual(retrieve.call_args.kwargs['query_context'], 'not blue')
-        self.assertEqual(retrieve.call_args.kwargs['limit'], 5)
+        self.assertEqual(retrieve.call_args.kwargs['limit'], 20)
         self.assertEqual(state['recommendations'], products)
         self.assertEqual(state['status'], 'ok')
         self.assertIn('not verified', state['message'])
