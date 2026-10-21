@@ -14,11 +14,10 @@ const ProductSchema = z.object({
 
 export const ProductActions = createContext<{
   selected: string[];
-  recommendations: boolean;
   toggle: (id: string) => void;
   addToCart: (id: string) => void;
   busy: boolean;
-}>({ selected: [], recommendations: false, toggle: () => undefined, addToCart: () => undefined, busy: false });
+}>({ selected: [], toggle: () => undefined, addToCart: () => undefined, busy: false });
 
 const definitions = {
   ProductGallery: {
@@ -34,15 +33,14 @@ const renderers: CatalogRenderers<typeof definitions> = {
     const heading = typeof props.heading === "string" ? props.heading : "Products";
     const eyebrow = heading === "Closest alternatives" ? "CLOSEST AVAILABLE OPTIONS"
       : heading === "Recommended for you" ? "A BETTER FIT, FOUND" : "A GOOD PLACE TO START";
-    const recommended = false;
     return <section className="a2ui-gallery">
       <div className="section-head"><div><div className="eyebrow">{eyebrow}</div><h2>{heading}</h2></div>
-        {!recommended && <span className="selection-count">{actions.selected.length}/3 selected</span>}</div>
+        <span className="selection-count">{actions.selected.length}/3 selected</span></div>
       <div className="product-grid">{products.map((product, index) => {
         const active = actions.selected.includes(product.id);
-        return <div key={product.id}><button className={`product-card ${active ? "is-selected" : ""} ${recommended ? "is-result" : ""}`} onClick={() => !recommended && actions.toggle(product.id)} aria-pressed={active} disabled={actions.busy}>
+        return <div key={product.id}><button className={`product-card ${active ? "is-selected" : ""}`} onClick={() => actions.toggle(product.id)} aria-pressed={active} disabled={actions.busy}>
           <div className="image-wrap">{product.image_url ? <img src={product.image_url} alt={product.title} loading={index < 3 ? "eager" : "lazy"} /> : <div className="image-placeholder">Image unavailable</div>}
-            {!recommended && <span className={`pick-indicator ${active ? "checked" : ""}`}>{active ? "✓" : "+"}</span>}</div>
+            <span className={`pick-indicator ${active ? "checked" : ""}`}>{active ? "✓" : "+"}</span></div>
           <div className="product-info"><span className="product-number">{String(index + 1).padStart(2, "0")}</span><div><h3>{product.title || "Untitled product"}</h3><p>{product.brand || product.category || "Catalogue find"}</p></div></div>
         </button><button type="button" disabled={actions.busy} onClick={() => actions.addToCart(product.id)}>Add to cart</button></div>;
       })}</div>

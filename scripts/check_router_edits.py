@@ -64,6 +64,18 @@ def main():
                 real_complete = workflow.complete
 
                 def observe(*positional, **keywords):
+                    """Capture and return the actual router completion result.
+
+                    Args:
+                        *positional: Positional arguments forwarded unchanged
+                            to ``workflow.complete``.
+                        **keywords: Keyword arguments forwarded unchanged to
+                            ``workflow.complete``.
+
+                    Returns:
+                        The validated router model from the real model call;
+                        its serialized fields are also recorded in this case.
+                    """
                     output = real_complete(*positional, **keywords)
                     result['model_output'] = output.model_dump()
                     return output

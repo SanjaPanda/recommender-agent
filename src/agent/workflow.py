@@ -49,7 +49,26 @@ class RecommendationState(TypedDict, total=False):
 
 
 def _route(state: RecommendationState) -> dict:
-    """Handle explicit actions or apply model-proposed edits atomically."""
+    """Resolve the current turn into a safe plan and graph route.
+
+    Handles reset/category/cart actions and unambiguous search refinements in
+    application code. Other messages are sent to the typed Ollama router, whose
+    proposed edits are applied atomically. Product IDs are checked against the
+    currently displayed session cards, and category filters are restricted to
+    the apparel taxonomy.
+
+    Args:
+        state: Prior persisted state plus the current turn payload.
+
+    Returns:
+        A partial graph-state update containing the validated plan, route,
+        status, message, and any updated selection/cart/context fields.
+
+    Raises:
+        ValueError: If selection IDs, category scope, or explicit actions fail
+            deterministic validation.
+        ModelError: If the required local router call fails or returns invalid data.
+    """
     turn = state.get('turn', {})
     text = (turn.get('query') or turn.get('refinement') or '').strip()
     categories = list_categories()
@@ -174,7 +193,25 @@ def _route(state: RecommendationState) -> dict:
 
 
 def _retrieve(state: RecommendationState) -> dict:
-    """Return strong matches or closest alternatives within active SQL scope."""
+    """Retrieve and relevance-gate products under active catalog filters.
+
+    Builds a semantic query from the plan query and saved preferences. Empty
+    query browsing returns candidates without automatically recommending them;
+    searches rank a wider pool and keep strong matches. If none survive, one
+    fallback pass can relax title color/product constraints while preserving
+    category, brand, and condition constraints.
+
+    Args:
+        state: Graph state containing the validated plan and selected examples.
+
+    Returns:
+        Candidate rows, an empty recommendation list for the response node to
+        finalize, and a result-kind marker (browse, matches, fallback, or none).
+
+    Raises:
+        ValueError: For invalid plan/filter/example contracts.
+        RuntimeError: If required embedding or database services are unavailable.
+    """
     plan = Plan.model_validate(state['plan'])
     query = ' '.join(part for part in [plan.query, *(p.requirement for p in plan.preferences)] if part)
     selected = state.get('selected_product_ids', [])
@@ -233,7 +270,20 @@ def _retrieve(state: RecommendationState) -> dict:
 
 
 def _respond(state: RecommendationState) -> dict:
-    """Return retrieval order and clearly identify unverified preferences."""
+    """Format candidates as recommendations and explain retrieval limitations.
+
+    Generates deterministic count/status text by result kind. Optional summary
+    prose is requested only when configured and is constrained to supplied
+    product facts; a model failure leaves the catalog cards usable.
+
+    Args:
+        state: Current graph state after routing and, when selected, retrieval.
+
+    Returns:
+        A partial state update with recommendations, user-facing message,
+        status, and bounded conversation history. Returns an empty update when
+        the router selected the direct-response branch.
+    """
     if state.get('route') != 'retrieve':
         return {}
     plan = Plan.model_validate(state['plan'])
@@ -279,7 +329,17 @@ def _respond(state: RecommendationState) -> dict:
 
 
 def build_recommendation_agent(*, checkpointer: Any | None = None):
-    """Build an acyclic graph with a durable snapshot around each complete turn."""
+    """Compile the router/retrieval/response LangGraph workflow.
+
+    Args:
+        checkpointer: Optional LangGraph checkpointer passed to ``compile``.
+            The API's normal durable session snapshots are managed separately
+            by ``run_recommendation_turn``.
+
+    Returns:
+        A compiled graph whose router selects either retrieval then response,
+        or a direct response, and whose response node ends the turn.
+    """
     graph = StateGraph(RecommendationState)
     for name, function in (('router', _route), ('retrieve', _retrieve), ('respond', _respond)):
         graph.add_node(name, _trace_node(name, function))
@@ -300,6 +360,19 @@ def _trace_node(
     omitted. A failed node is logged by name and duration, then re-raised.
     """
     def traced(state: RecommendationState) -> dict[str, Any]:
+        """Run the node and append one privacy-limited trace event.
+
+        Args:
+            state: Current state supplied by LangGraph.
+
+        Returns:
+            The node's state update with an ``AgentTraceEvent`` appended to
+            the transient ``trace`` list.
+
+        Raises:
+            Exception: Re-raises any exception from the wrapped node after
+                logging its type and elapsed time.
+        """
         started = perf_counter()
         try:
             update = node(state)
@@ -402,7 +475,26 @@ def _can_pass_plain_search(text: str, previous_plan: Plan) -> bool:
 
 
 def run_recommendation_turn(agent: Any, *, thread_id: str, turn: dict[str, Any]) -> dict[str, Any]:
-    """Serialize each session and atomically save its context and cart after a turn."""
+    """Run one session turn under a PostgreSQL row lock and save its snapshot.
+
+    The session row is created if needed, locked while the graph runs, and
+    updated in the same database transaction. Persisted references are checked
+    against the apparel catalog before invocation. Transient request, candidate,
+    category, uncertainty, and trace fields are omitted from the durable JSONB.
+
+    Args:
+        agent: Compiled LangGraph graph to invoke.
+        thread_id: Nonblank persistent session identifier, at most 128 characters.
+        turn: Current request fields consumed by the router node.
+
+    Returns:
+        The full graph state for formatting into the API/CLI response.
+
+    Raises:
+        ValueError: If ``thread_id`` is invalid or a graph-level check rejects
+            the requested action.
+        psycopg.Error: If PostgreSQL cannot create, lock, read, or save the session.
+    """
     if not thread_id.strip() or len(thread_id) > 128:
         raise ValueError('Invalid session ID.')
     with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:

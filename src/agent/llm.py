@@ -24,7 +24,27 @@ def complete(
     *,
     timeout: float | None = None,
 ) -> ResponseT:
-    """Make one local model call with no hidden retry or agent loop."""
+    """Call local Ollama once and validate its JSON against a Pydantic schema.
+
+    The request sends the schema's JSON Schema as Ollama's constrained output
+    format. There is no retry loop. Routing contracts use the configured router
+    timeout; other contracts default to 120 seconds unless ``timeout`` is given.
+
+    Args:
+        schema: Pydantic model class used for JSON schema generation and response
+            validation.
+        system: System instruction describing the permitted response behavior.
+        data: Typed request payload serialized as the user message.
+        timeout: Optional positive finite timeout in seconds; when omitted,
+            selected from the configured router timeout or the 120-second default.
+
+    Returns:
+        A validated instance of ``schema``.
+
+    Raises:
+        ModelError: If the timeout is invalid, the endpoint is non-local/unavailable,
+            or returned JSON fails schema validation.
+    """
     if timeout is None:
         timeout = settings.agent_router_timeout_seconds if schema.__name__ in {'Plan', 'TurnEdits'} else 120
     if not math.isfinite(timeout) or timeout <= 0:

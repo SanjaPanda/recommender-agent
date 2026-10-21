@@ -112,7 +112,7 @@ function RecommendationApp() {
       </li>)}</ol>
     </details>}
     {Boolean(session?.products.length) && <section className="results">
-      <ProductActions.Provider value={{ selected, recommendations: false, toggle, addToCart: id => cart("cart_add", id), busy }}>
+      <ProductActions.Provider value={{ selected, toggle, addToCart: id => cart("cart_add", id), busy }}>
         <A2UIRenderer surfaceId={session!.a2ui_surface_id} fallback={<p>Loading products...</p>} />
       </ProductActions.Provider>
     </section>}

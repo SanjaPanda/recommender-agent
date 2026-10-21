@@ -162,6 +162,15 @@ def retrieve_products(
             product["score"] += weight / (60 + rank)
 
     def ranking_key(item: dict[str, Any]) -> tuple[bool, float]:
+        """Prioritize a requested type in the primary title, then retrieval score.
+
+        Args:
+            item: Fused candidate containing a product title and rank score.
+
+        Returns:
+            A descending sort tuple of title-match flag and fused score. When
+            no type filter is active, candidates are ordered by score alone.
+        """
         product_type = active_filters.get("title_product")
         if not product_type:
             return False, item["score"]

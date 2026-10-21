@@ -51,12 +51,34 @@ def main() -> None:
     base = f'http://127.0.0.1:{port}'
 
     def check(name, passed):
+        """Record a named assertion or stop the live check on failure.
+
+        Args:
+            name: Description included in the report and console output.
+            passed: Condition that must be true for the check to succeed.
+
+        Raises:
+            AssertionError: If ``passed`` is false.
+        """
         if not passed:
             raise AssertionError(name)
         report['checks'].append(name)
         print('PASS:', name, flush=True)
 
     def post(path, body):
+        """POST JSON to the temporary API and record response timing.
+
+        Args:
+            path: API path relative to the temporary loopback server.
+            body: JSON-serializable request payload.
+
+        Returns:
+            The decoded JSON response object.
+
+        Raises:
+            urllib.error.URLError: If the request fails or times out.
+            json.JSONDecodeError: If the response is not valid JSON.
+        """
         request = urllib.request.Request(base + path, data=json.dumps(body).encode(),
                                          headers={'Content-Type': 'application/json'})
         started = time.monotonic()
@@ -69,6 +91,18 @@ def main() -> None:
         return result
 
     def start(log):
+        """Start the test API and poll its health endpoint until ready.
+
+        Args:
+            log: Open file-like object used for child stdout and stderr.
+
+        Returns:
+            The running child process.
+
+        Raises:
+            RuntimeError: If the process exits early or fails to become ready
+                within the bounded polling period. Startup failures terminate it.
+        """
         child = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'agent.api:app',
                                   '--host', '127.0.0.1', '--port', str(port)],
                                  cwd=ROOT, stdout=log, stderr=log)

@@ -141,7 +141,7 @@ def discover(request: DiscoverRequest) -> dict[str, Any]:
     """Start or continue a recommendation thread from a free-text request."""
     thread_id = request.thread_id or str(uuid4())
     try:
-        state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query, "limit": 5})
+        state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query})
         return _response(state, thread_id, "Choose products you like", create_surface=True)
     except psycopg.Error as exc:
         logger.exception("Database operation failed during discovery")
@@ -188,7 +188,7 @@ def recommend(request: RecommendRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="Selected product IDs must be unique.")
     if not request.selected_product_ids and not request.refinement.strip():
         raise HTTPException(status_code=422, detail="Select a product or add a preference.")
-    turn: dict[str, Any] = {"limit": 5}
+    turn: dict[str, Any] = {}
     if request.selected_product_ids is not None:
         turn["selected_product_ids"] = request.selected_product_ids
     if request.refinement.strip():

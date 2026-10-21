@@ -9,11 +9,39 @@ class AmbiguousEdit(ValueError):
 
 
 def normalized(value: str) -> str:
+    """Normalize text for case-insensitive, whitespace-insensitive comparison.
+
+    Args:
+        value: User or router text to compare with an existing plan value.
+
+    Returns:
+        The case-folded text with consecutive whitespace collapsed to single spaces.
+    """
     return ' '.join(value.casefold().split())
 
 
 def apply_edits(previous: Plan, turn: TurnEdits, message: str) -> Plan:
-    """Validate on a copy; any conflict leaves the caller's plan untouched."""
+    """Apply explicitly evidenced router edits to a copy of the shopping plan.
+
+    Each edit must quote text from the current message. Preference and category
+    edits target existing values when removing or replacing; scalar filters and
+    the search query are updated directly. The result is validated as a complete
+    ``Plan`` before it is returned.
+
+    Args:
+        previous: Validated shopping context from the preceding turn.
+        turn: Typed router decision containing intent, proposed edits, and any
+            displayed product IDs for cart actions.
+        message: Latest user message against which each edit's evidence is checked.
+
+    Returns:
+        A new validated plan; ``previous`` is not mutated.
+
+    Raises:
+        AmbiguousEdit: If evidence is missing, targets are ambiguous, edits
+            conflict, or an unsupported/inconsistent change is proposed.
+        pydantic.ValidationError: If the final plan violates its model contract.
+    """
     result = previous.model_copy(deep=True)
     result.intent, result.message, result.product_ids = turn.intent, turn.message, turn.product_ids
     if turn.intent != 'recommend':
