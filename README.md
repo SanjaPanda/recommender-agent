@@ -1,6 +1,6 @@
 # Apparel Recommender Agent
 
-A local apparel discovery app for **2,173** Apparel & Accessories products. It combines deterministic PostgreSQL filters, Nomic product/caption retrieval, CLIP image retrieval, one LangGraph agent, Ollama structured outputs, and an A2UI product gallery.
+A local apparel discovery app for **2,173** Apparel & Accessories products. It combines deterministic PostgreSQL filters, Nomic product-text retrieval, CLIP image retrieval, one LangGraph agent, Ollama structured outputs, and an A2UI product gallery.
 
 ## Run locally
 
@@ -22,7 +22,7 @@ ollama pull gemma3:4b
 ollama pull nomic-embed-text
 ```
 
-The CLIP model is loaded from the local Hugging Face cache at request time. Download/cache `openai/clip-vit-base-patch32` before running the app; request handling never downloads model files. The agent falls back to text and cached captions if CLIP files are unavailable.
+The CLIP model is loaded from the local Hugging Face cache at request time. Download/cache `openai/clip-vit-base-patch32` before running the app; request handling never downloads model files. If CLIP files are unavailable, retrieval falls back to product text.
 
 Start the API and UI in separate terminals:
 

@@ -23,7 +23,6 @@ image = [
 ]
 
 [project.scripts]
-recommender-describe-images = "rag.describe_images:main"
 recommender-embed-products = "rag.embed_text:main"
 recommender-search = "rag.search:main"
 recommender-embed-images = "rag.embed_images:main"

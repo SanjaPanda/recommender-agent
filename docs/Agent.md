@@ -11,7 +11,6 @@ The route step calls Ollama with a typed `RouterRequest` and validates `TurnEdit
 - `Plan`, `Filters`, `Preference`, and `TurnEdits` define shopping state and router output.
 - `RouterRequest` and `ExplanationRequest` define structured LLM inputs.
 - `Summary` validates optional free-form summary text.
-- `VisualAttributes` validates offline apparel caption fields.
 - FastAPI request models validate discovery, session, cart, and refinement inputs.
 
 `complete()` accepts a Pydantic v2 input model and output model class. It sends the output JSON Schema to Ollama, parses the returned JSON with Pydantic, and raises `ModelError` if the provider is unavailable or returns invalid data. Calls have bounded timeouts and no hidden retries.
@@ -20,7 +19,7 @@ The route step calls Ollama with a typed `RouterRequest` and validates `TurnEdit
 
 The stable source ID is carried unchanged in PostgreSQL, embeddings, saved sessions, API product cards, and A2UI selections. Missing descriptions, brands, or local image files are allowed. Missing images omit the UI image URL and do not prevent text retrieval. Products missing CLIP vectors cannot be used as visual examples; the current catalog has CLIP vectors for all 2,173 apparel products.
 
-Image descriptions are still pending for most records: 124 of 2,173 apparel products have cached captions, leaving 2,049 pending. This is optional enrichment. The request path ranks product text and CLIP for all products and uses caption vectors where present; it does not run vision inference per search. See setup for the small-batch caption command.
+Image descriptions are outside the active product pipeline. The small catalog uses product text and CLIP image vectors; no vision-language model is loaded and no caption generation, caption embedding, or caption import commands are installed.
 
 Retrieval always constrains the root category to `Apparel & Accessories`, including before database cleanup. Saved sessions from the old mixed catalog are filtered to currently valid apparel product IDs when loaded or continued; the session row and message history remain in PostgreSQL.
 

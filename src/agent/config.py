@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     agent_model: str = Field(default="gemma3:4b", min_length=1, description="One local Ollama model for routing and optional summaries.")
     embedding_model: str = Field(default="nomic-embed-text", min_length=1, description="Ollama model used for product/query text vectors.")
     image_embedding_model: str = Field(default="openai/clip-vit-base-patch32", min_length=1, description="Cached local CLIP model used for product and query image-space vectors.")
-    image_description_model: str = Field(default="moondream", min_length=1, description="Optional Ollama vision model used only for offline captions.")
     agent_think: bool = Field(default=False, description="Enable Ollama reasoning mode.")
     agent_router_timeout_seconds: float = Field(
         default=180, gt=0, le=600,

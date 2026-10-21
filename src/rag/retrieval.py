@@ -26,10 +26,10 @@ def retrieve_products(
     limit: int = 5,
     filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Rank apparel by product text, cached captions, CLIP images, and examples.
+    """Rank apparel by product text, CLIP images, and selected examples.
 
-    Query ranking fuses Nomic product-text (0.50), Nomic caption (0.25), and
-    CLIP text-to-image (0.25) reciprocal ranks. Missing modes are renormalized.
+    Query ranking fuses Nomic product-text (0.50) and CLIP text-to-image
+    (0.50) reciprocal ranks. Missing modes are renormalized.
     Selected catalog products add a CLIP image-example rank. SQL filters are
     applied before candidate limits, and every result stays under the apparel root.
 
@@ -67,10 +67,9 @@ def retrieve_products(
         try:
             clip_vector = clip_text_embedding(query_context)
         except (RuntimeError, ValueError) as exc:
-            logger.warning("CLIP text retrieval unavailable; using Nomic text/caption rankings: %s", exc)
+            logger.warning("CLIP text retrieval unavailable; using Nomic text ranking: %s", exc)
 
     text_rows: list[tuple[Any, ...]] = []
-    caption_rows: list[tuple[Any, ...]] = []
     clip_rows: list[tuple[Any, ...]] = []
     example_rows: list[tuple[Any, ...]] = []
     with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
@@ -87,7 +86,7 @@ def retrieve_products(
                     "id": row[0], "title": row[1], "description": row[2], "brand": row[3],
                     "category": row[4], "image_meta": row[5], "is_secondhand": row[6],
                     "score": 0.0, "text_similarity": None,
-                    "image_description_similarity": None, "image_similarity": None,
+                    "image_similarity": None,
                     "visual_source": "hybrid",
                 }
                 for row in rows
@@ -128,11 +127,6 @@ def retrieve_products(
                 category_clause=category_clause, category_params=category_params,
                 excluded_ids=exclude_refs, limit=candidate_limit,
             )
-            caption_rows = _search_embedding(
-                connection, vector=Vector(query_vector), modality="image_description", model=TEXT_MODEL,
-                category_clause=category_clause, category_params=category_params,
-                excluded_ids=exclude_refs, limit=candidate_limit,
-            )
             if clip_vector is not None:
                 clip_rows = _search_embedding(
                     connection, vector=Vector(clip_vector), modality="image", model=IMAGE_MODEL,
@@ -144,8 +138,7 @@ def retrieve_products(
     if query_vector is not None:
         ranked_lists.extend([
             (text_rows, "text", 0.50),
-            (caption_rows, "image_description", 0.25),
-            (clip_rows, "image", 0.25),
+            (clip_rows, "image", 0.50),
         ])
     if example_rows:
         ranked_lists.append((example_rows, "image", 0.20 if query_vector is not None else 1.0))
@@ -161,7 +154,7 @@ def retrieve_products(
             product = fused.setdefault(product_id, {
                 "id": product_id, "title": title, "description": description, "brand": brand,
                 "category": category, "image_meta": image_meta, "is_secondhand": is_secondhand,
-                "image_similarity": None, "image_description_similarity": None,
+                "image_similarity": None,
                 "text_similarity": None, "score": 0.0, "visual_source": "hybrid",
             })
             product[f"{modality}_similarity"] = float(similarity)
