@@ -13,6 +13,13 @@ def product_gallery_operations(
     """Create a gallery surface once, then update its cards for later turns."""
     operations = []
     if create_surface:
+        # Session resume, reset, discovery and cart responses can reuse an ID.
+        # The renderer rejects duplicate createSurface and skips the whole batch.
+        # Deletion is a no-op when absent; replace before sending the snapshot.
+        operations.append({
+            "version": "v0.9",
+            "deleteSurface": {"surfaceId": surface_id},
+        })
         operations.append({
             "version": "v0.9",
             "createSurface": {"surfaceId": surface_id, "catalogId": CATALOG_ID},

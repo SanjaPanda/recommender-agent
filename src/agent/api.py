@@ -1,25 +1,25 @@
 """HTTP API and local web entry point for the product recommendation agent."""
 from __future__ import annotations
 
-import os
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from typing import Literal
 
 import psycopg
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .a2ui import product_gallery_operations
-from .workflow import build_recommendation_agent, run_recommendation_turn
+from .config import settings
+from .workflow import build_recommendation_agent, run_recommendation_turn, sanitize_apparel_products
 
-ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT / ".env")
+ROOT = settings.model_config["env_file"].parent
 app = FastAPI(title="Product Recommender Agent", version="0.1.0")
+logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
                    allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
 agent = build_recommendation_agent()
@@ -29,28 +29,28 @@ IMAGE_PATHS: dict[str, Path] = {}
 class DiscoverRequest(BaseModel):
     """Validate a user's initial product-discovery query and optional thread."""
 
-    query: str = Field(min_length=1, max_length=1000)
-    thread_id: str | None = Field(default=None, max_length=128)
+    query: str = Field(min_length=1, max_length=1000, description="Initial apparel search request.")
+    thread_id: str | None = Field(default=None, max_length=128, description="Existing session ID, if continuing a thread.")
 
 
 class RecommendRequest(BaseModel):
     """Validate selected examples and free-text refinement for a follow-up."""
 
-    thread_id: str = Field(min_length=1, max_length=128)
-    selected_product_ids: list[str] | None = Field(default=None, max_length=3)
-    refinement: str = Field(default="", max_length=1000)
+    thread_id: str = Field(min_length=1, max_length=128, description="Existing recommendation session ID.")
+    selected_product_ids: list[str] | None = Field(default=None, max_length=3, description="Displayed cards to use as visual examples.")
+    refinement: str = Field(default="", max_length=1000, description="Preference update for the current session.")
 
 
 class SessionRequest(BaseModel):
     """Create or resume a persistent shopping session."""
-    thread_id: str | None = Field(default=None, max_length=128)
+    thread_id: str | None = Field(default=None, max_length=128, description="Session to resume, or none to create a new one.")
 
 
 class CartRequest(BaseModel):
     """Explicit cart actions; selecting an example never mutates the cart."""
-    thread_id: str = Field(min_length=1, max_length=128)
-    action: Literal["cart_add", "cart_remove", "cart_show"]
-    product_ids: list[str] = Field(default_factory=list, max_length=20)
+    thread_id: str = Field(min_length=1, max_length=128, description="Session whose cart should change.")
+    action: Literal["cart_add", "cart_remove", "cart_show"] = Field(description="Explicit cart operation.")
+    product_ids: list[str] = Field(default_factory=list, max_length=20, description="Displayed product IDs for add/remove operations.")
 
 
 def _find_image_path(image_meta: Any) -> Path | None:
@@ -63,8 +63,10 @@ def _find_image_path(image_meta: Any) -> Path | None:
     candidate_rel = Path(relative)
     if candidate_rel.is_absolute() or ".." in candidate_rel.parts:
         return None
-    roots = [ROOT / ".data" / "shopify-catalogue-sample"]
-    roots.extend(path for path in (ROOT / ".data").glob("*/") if path.is_dir())
+    roots = [
+        ROOT / ".data" / "shopify-selected-train",
+        ROOT / ".data" / "shopify-selected-test",
+    ]
     for root in roots:
         candidate = (root / candidate_rel).resolve()
         try:
@@ -81,10 +83,7 @@ def _product_image_path(product_id: str) -> Path | None:
     cached = IMAGE_PATHS.get(product_id)
     if cached and cached.is_file():
         return cached
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        return None
-    with psycopg.connect(database_url, connect_timeout=5) as connection:
+    with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
         row = connection.execute("SELECT image FROM products WHERE id = %s", (product_id,)).fetchone()
     return _find_image_path(row[0]) if row else None
 
@@ -142,6 +141,7 @@ def discover(request: DiscoverRequest) -> dict[str, Any]:
         state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query, "limit": 5})
         return _response(state, thread_id, "Choose products you like", create_surface=True)
     except psycopg.Error as exc:
+        logger.exception("Database operation failed during discovery")
         raise HTTPException(status_code=503, detail="Catalogue database is unavailable. Start PostgreSQL and retry.") from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -152,11 +152,12 @@ def session(request: SessionRequest) -> dict[str, Any]:
     """Load saved cards/cart, or show categories on a new session without an LLM."""
     thread_id = request.thread_id or str(uuid4())
     try:
-        with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=5) as connection:
+        with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
             saved = connection.execute("SELECT state FROM agent_sessions WHERE thread_id=%s", (thread_id,)).fetchone()
-        if saved:
+            state = sanitize_apparel_products(connection, saved[0]) if saved else None
+        if state is not None:
             from rag.retrieval import list_categories
-            state = {**saved[0], "categories": list_categories()}
+            state = {**state, "categories": list_categories()}
         else:
             state = run_recommendation_turn(agent, thread_id=thread_id, turn={})
         return _response(state, thread_id, "Recommended for you", create_surface=True)

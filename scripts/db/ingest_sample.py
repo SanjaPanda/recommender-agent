@@ -3,17 +3,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import psycopg
-from dotenv import load_dotenv
 from psycopg.types.json import Jsonb
 
-ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT / ".env")
-DEFAULT_INPUT = ROOT / ".data" / "shopify-catalogue-sample" / "products.jsonl"
+from agent.config import ROOT, settings
+
+DEFAULT_INPUTS = (
+    ROOT / ".data" / "shopify-selected-train" / "products.jsonl",
+    ROOT / ".data" / "shopify-selected-test" / "products.jsonl",
+)
+APPAREL_CATEGORY = "Apparel & Accessories"
 UPSERT_PRODUCT = """
 INSERT INTO products (
     id, title, description, brand, category, is_secondhand,
@@ -40,49 +42,71 @@ def source_image_meta(row: dict[str, Any]) -> dict[str, Any] | None:
     return image if isinstance(image, dict) else None
 
 
+def is_apparel(row: dict[str, Any]) -> bool:
+    """Return whether a dataset row belongs to the apparel taxonomy."""
+    category = row.get("ground_truth_category")
+    return isinstance(category, str) and (
+        category == APPAREL_CATEGORY or category.startswith(APPAREL_CATEGORY + " > ")
+    )
+
+
+def read_apparel_rows(paths: Iterable[Path], limit: int | None = None) -> list[dict[str, Any]]:
+    """Read validated apparel rows from the pinned train and test samples.
+
+    Non-apparel rows are ignored, duplicate source IDs are loaded once, and
+    ``limit`` counts apparel rows only.
+    """
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Apparel sample is missing: {path}. See the documented fetch commands."
+            )
+        with path.open(encoding="utf-8") as source_file:
+            for line_number, line in enumerate(source_file, start=1):
+                row = json.loads(line)
+                if not is_apparel(row):
+                    continue
+                product_id = row.get("id")
+                if not isinstance(product_id, str) or not product_id.strip():
+                    raise ValueError(f"Missing product ID in {path}, line {line_number}.")
+                if product_id in seen_ids:
+                    continue
+                seen_ids.add(product_id)
+                rows.append(row)
+                if limit is not None and len(rows) >= limit:
+                    return rows
+    return rows
+
+
 def main() -> None:
-    """Read sample JSONL and idempotently upsert catalogue products."""
+    """Import only apparel from the pinned train/test samples into PostgreSQL.
+
+    Run with ``uv run python scripts/db/ingest_sample.py``. The importer skips
+    non-apparel rows and upserts by stable source ID, so reruns are idempotent.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
-    if not args.input.is_file():
-        raise SystemExit(
-            f"Sample file not found: {args.input}. Fetch it with scripts/data/fetch_sample.py."
-        )
-
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise SystemExit("Set DATABASE_URL to the target PostgreSQL database.")
-
-    count = 0
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor, args.input.open(encoding="utf-8") as source_file:
-            for line_number, line in enumerate(source_file, start=1):
-                if args.limit is not None and count >= args.limit:
-                    break
-                row = json.loads(line)
+    rows = read_apparel_rows(DEFAULT_INPUTS, args.limit)
+    with psycopg.connect(settings.database_url.get_secret_value()) as connection:
+        with connection.cursor() as cursor:
+            for row in rows:
                 image_meta = source_image_meta(row)
-                values = {
+                cursor.execute(UPSERT_PRODUCT, {
                     "id": row["id"],
                     "title": row.get("product_title"),
                     "description": row.get("product_description"),
                     "brand": row.get("ground_truth_brand"),
-                    "category": " | ".join(row.get("potential_product_categories") or [])
-                    or row.get("ground_truth_category"),
+                    "category": row.get("ground_truth_category"),
                     "is_secondhand": row.get("ground_truth_is_secondhand"),
                     "image": Jsonb(image_meta) if image_meta is not None else None,
                     "raw_source": Jsonb(row),
-                }
-                try:
-                    cursor.execute(UPSERT_PRODUCT, values)
-                except Exception as exc:
-                    raise RuntimeError(f"Failed to import source line {line_number}") from exc
-                count += 1
-
-    print(f"Upserted {count} product rows from {args.input}")
+                })
+    print(f"Upserted {len(rows)} unique Apparel & Accessories products from the train/test samples.")
     print("Running the importer again updates those same rows by deterministic ID.")
 
 

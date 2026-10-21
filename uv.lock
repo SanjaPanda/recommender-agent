@@ -1203,7 +1203,7 @@ dependencies = [
     { name = "pgvector" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic-settings" },
-    { name = "python-dotenv" },
+    { name = "tqdm" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1223,7 +1223,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'image'", specifier = ">=10,<13" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.7,<3" },
-    { name = "python-dotenv", specifier = ">=1,<2" },
+    { name = "tqdm", specifier = ">=4.66,<5" },
     { name = "torch", marker = "extra == 'image'", specifier = ">=2.4,<3" },
     { name = "transformers", marker = "extra == 'image'", specifier = ">=4.45,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },

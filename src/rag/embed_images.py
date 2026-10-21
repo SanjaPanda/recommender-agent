@@ -3,23 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any
 
 import psycopg
-from dotenv import load_dotenv
 from pgvector import Vector
 from pgvector.psycopg import register_vector
 
-ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT / ".env")
-MODEL = os.environ.get("IMAGE_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
+from agent.config import ROOT, settings
+
+MODEL = settings.image_embedding_model
 DEFAULT_IMAGE_ROOTS = [
-    ROOT / ".data" / "shopify-catalogue-sample",
-    ROOT / ".data" / "shopify-outdoor-garden",
-    ROOT / ".data" / "shopify-outdoor-garden-1000",
     ROOT / ".data" / "shopify-selected-train",
     ROOT / ".data" / "shopify-selected-test",
 ]
@@ -57,9 +52,7 @@ def main() -> None:
     if not 1 <= args.batch_size <= 16:
         parser.error("--batch-size must be between 1 and 16")
 
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise SystemExit("Set DATABASE_URL to the PostgreSQL database.")
+    database_url = settings.database_url.get_secret_value()
     roots = [path.resolve() for path in (args.image_root or DEFAULT_IMAGE_ROOTS)]
 
     try:

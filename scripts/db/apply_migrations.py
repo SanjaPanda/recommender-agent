@@ -1,25 +1,18 @@
 """Apply ordered SQL migrations to the configured PostgreSQL database."""
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
 import psycopg
-from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT / ".env")
+from agent.config import ROOT, settings
+
 MIGRATIONS = ROOT / "migrations"
 
 
 def main() -> None:
     """Apply each unapplied SQL migration in filename order."""
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise SystemExit("Set DATABASE_URL to a PostgreSQL database with pgvector available.")
-
-    with psycopg.connect(database_url) as connection:
+    with psycopg.connect(settings.database_url.get_secret_value()) as connection:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"

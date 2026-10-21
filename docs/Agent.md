@@ -1,0 +1,34 @@
+# Agent guide
+
+## Responsibilities
+
+The application is one LangGraph agent with three steps: route the latest user message, retrieve apparel candidates, and form the response. FastAPI validates external requests; PostgreSQL persists session state and the cart; the UI receives a bounded set of product cards and A2UI operations.
+
+The route step calls Ollama with a typed `RouterRequest` and validates `TurnEdits`. Code applies supported edits atomically. Category, brand, condition, title color/product filters, product selection, and cart eligibility are deterministic checks. Preferences persist across turns. Unsupported prices and ambiguous edits produce clarification responses.
+
+## Data contracts
+
+- `Plan`, `Filters`, `Preference`, and `TurnEdits` define shopping state and router output.
+- `RouterRequest` and `ExplanationRequest` define structured LLM inputs.
+- `Summary` validates optional free-form summary text.
+- `VisualAttributes` validates offline apparel caption fields.
+- FastAPI request models validate discovery, session, cart, and refinement inputs.
+
+`complete()` accepts a Pydantic v2 input model and output model class. It sends the output JSON Schema to Ollama, parses the returned JSON with Pydantic, and raises `ModelError` if the provider is unavailable or returns invalid data. Calls have bounded timeouts and no hidden retries.
+
+## Product identity and missing data
+
+The stable source ID is carried unchanged in PostgreSQL, embeddings, saved sessions, API product cards, and A2UI selections. Missing descriptions, brands, or local image files are allowed. Missing images omit the UI image URL and do not prevent text retrieval. Products missing CLIP vectors cannot be used as visual examples; the current catalog has CLIP vectors for all 2,173 apparel products.
+
+Image descriptions are still pending for most records: 124 of 2,173 apparel products have cached captions, leaving 2,049 pending. This is optional enrichment. The request path ranks product text and CLIP for all products and uses caption vectors where present; it does not run vision inference per search. See setup for the small-batch caption command.
+
+Retrieval always constrains the root category to `Apparel & Accessories`, including before database cleanup. Saved sessions from the old mixed catalog are filtered to currently valid apparel product IDs when loaded or continued; the session row and message history remain in PostgreSQL.
+
+## Local interfaces
+
+- API: `uv run recommender-agent-api` (`http://127.0.0.1:8000`)
+- Web/A2UI: `docker compose up -d --build web` (`http://localhost:3000`)
+- Terminal harness: `uv run recommender-agent-chat`
+- Retrieval inspection: `uv run recommender-search "blue cotton dress"`
+
+The web gallery supports selecting up to three displayed products as visual examples and adding free-text preference refinements. See [setup](SETUP.md) and [architecture](architecture.md).

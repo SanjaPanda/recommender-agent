@@ -3,6 +3,8 @@ services:
     image: pgvector/pgvector:pg17
     container_name: recommender-postgres
     restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.5
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-recommender_agent}
       POSTGRES_USER: ${POSTGRES_USER:-recommender}
@@ -22,6 +24,8 @@ services:
       context: ./src/ui
     container_name: recommender-web
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
     environment:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"

@@ -1,1 +1,1 @@
-"""Catalogue data, embeddings, retrieval, and evaluation package."""
+"""Apparel ingestion, embeddings, offline enrichment, and retrieval."""

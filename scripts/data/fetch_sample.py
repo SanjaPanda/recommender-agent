@@ -13,6 +13,8 @@ from datasets import Image, load_dataset
 
 DATASET_ID = "Shopify/product-catalogue"
 DATASET_REVISION = "002ca15536bb015ebc47b99cc2d716d7040bb09e"
+APPAREL_CATEGORY = "Apparel & Accessories"
+IDENTITY_MAP = Path(__file__).resolve().parents[2] / "data" / "apparel_product_ids.json"
 FIELDS = (
     "product_title",
     "product_description",
@@ -58,29 +60,30 @@ def identity_key(row: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def existing_sample_identities(path: Path) -> dict[str, str]:
-    """Map content-derived identities to IDs already present in a sample file."""
+def load_product_ids(path: Path = IDENTITY_MAP) -> dict[str, str]:
+    """Load the compact content-hash to stable-ID map for apparel records."""
     if not path.is_file():
         return {}
-    identities = {}
-    with path.open(encoding="utf-8") as source_file:
-        for line in source_file:
-            row = json.loads(line)
-            identities[identity_key(row)] = row["id"]
+    identities = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(identities, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in identities.items()
+    ):
+        raise ValueError(f"Invalid apparel product ID map: {path}")
     return identities
 
 
 def main() -> None:
-    """Stream a pinned Shopify dataset sample and save JSONL rows and images."""
+    """Stream pinned Apparel & Accessories rows and save JSONL records/images.
+
+    Run ``uv run python scripts/data/fetch_sample.py --rows 50000 --split train``
+    and repeat with ``--split test`` to fetch both apparel-only dataset splits.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rows", type=int, default=250, help="Maximum matching rows to fetch")
+    parser.add_argument("--rows", type=int, default=50000, help="Maximum apparel rows to fetch")
     parser.add_argument("--split", choices=("train", "test"), default="train")
     parser.add_argument(
-        "--output-dir", type=Path, default=Path(".data/shopify-catalogue-sample")
-    )
-    parser.add_argument(
-        "--category-prefix", action="append", default=[],
-        help="Keep rows whose ground_truth_category equals or starts with this prefix; repeatable",
+        "--output-dir", type=Path, default=Path(".data/shopify-selected-train")
     )
     args = parser.parse_args()
     if args.rows < 1:
@@ -92,11 +95,7 @@ def main() -> None:
     image_root = image_dir.parent
     dataset = load_dataset(DATASET_ID, split=args.split, streaming=True, revision=DATASET_REVISION)
     dataset = dataset.cast_column("product_image", Image(decode=False))
-    existing_identities = (
-        existing_sample_identities(Path(".data/shopify-catalogue-sample/products.jsonl"))
-        if args.category_prefix
-        else {}
-    )
+    existing_identities = load_product_ids()
 
     missing = Counter()
     titles = Counter()
@@ -114,11 +113,8 @@ def main() -> None:
             if rows_scanned % 500 == 0:
                 print(f"Scanned {rows_scanned}; saved {rows_read} ({args.split})", flush=True)
             ground_truth_category = row.get("ground_truth_category") or ""
-            if args.category_prefix and not any(
-                ground_truth_category.casefold() == prefix.casefold()
-                or ground_truth_category.casefold().startswith(prefix.casefold() + " > ")
-                for prefix in args.category_prefix
-            ):
+            if not (ground_truth_category == APPAREL_CATEGORY
+                    or ground_truth_category.startswith(APPAREL_CATEGORY + " > ")):
                 continue
             rows_read += 1
             for field in FIELDS:
@@ -153,11 +149,8 @@ def main() -> None:
                     image_meta = {"available": False}
             source["product_image"] = image_meta
 
-            canonical = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            if args.category_prefix:
-                product_id = existing_identities.get(identity_key(source)) or identity_key(source)
-            else:
-                product_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            identity = identity_key(source)
+            product_id = existing_identities.get(identity, identity)
             products_file.write(
                 json.dumps({"id": product_id, **source}, ensure_ascii=False, separators=(",", ":"))
                 + "\n"
@@ -180,7 +173,7 @@ def main() -> None:
             "images": "images/",
         },
         "source_schema_fields": list(FIELDS),
-        "ground_truth_category_prefixes": args.category_prefix,
+        "ground_truth_category_prefixes": [APPAREL_CATEGORY],
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "notes": [
             "The selected split was streamed up to the requested matching-row limit or its end.",

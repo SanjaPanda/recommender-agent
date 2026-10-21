@@ -20,7 +20,7 @@ def _show(state: dict) -> None:
     for index, item in enumerate(recommendations, start=1):
         print(
             f"{index}. {item['title']}"
-            f" | image={item['image_similarity']}"
+            f" | caption={item.get('image_description_similarity')}"
             f" | text={item['text_similarity']}"
         )
         print(f"   id: {item['id']}")

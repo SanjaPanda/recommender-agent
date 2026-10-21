@@ -2,23 +2,21 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 import urllib.error
 import urllib.request
 import json
-from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import psycopg
-from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, field_validator
 from pgvector.psycopg import register_vector
 from pgvector import Vector
 
-ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT / ".env")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+from agent.config import ROOT, settings
+
+OLLAMA_URL = settings.ollama_url
+MODEL = settings.embedding_model
 
 
 def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -33,6 +31,73 @@ def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
             return json.load(response)
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"Could not reach Ollama at {OLLAMA_URL}: {exc}") from exc
+
+
+class EmbeddingRequest(BaseModel):
+    """Typed Ollama text-embedding request."""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str = Field(min_length=1)
+    input: str | list[str] = Field(description="One query/document or a batch of texts.")
+
+
+class EmbeddingResponse(BaseModel):
+    """Validated finite vectors returned by Ollama's embedding endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str = Field(min_length=1)
+    embeddings: list[Annotated[list[FiniteFloat], Field(min_length=1)]] = Field(min_length=1)
+    total_duration: int | None = Field(default=None, ge=0)
+    load_duration: int | None = Field(default=None, ge=0)
+    prompt_eval_count: int | None = Field(default=None, ge=0)
+    prompt_eval_duration: int | None = Field(default=None, ge=0)
+    eval_count: int | None = Field(default=None, ge=0)
+    eval_duration: int | None = Field(default=None, ge=0)
+
+    @field_validator("embeddings")
+    @classmethod
+    def finite_nonzero_consistent_vectors(
+        cls, vectors: list[list[float]]
+    ) -> list[list[float]]:
+        """Require equal-sized nonzero vectors before retrieval or storage."""
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) != 1 or any(not any(value != 0 for value in vector) for vector in vectors):
+            raise ValueError("Embedding vectors must share one dimension and be nonzero.")
+        return vectors
+
+
+def embed_texts(inputs: str | list[str]) -> list[list[float]]:
+    """Embed one or more strings with the configured local Nomic model.
+
+    Args:
+        inputs: Non-empty search query or batch of product texts.
+
+    Returns:
+        Finite embedding vectors in input order.
+
+    Raises:
+        ValueError: If no text is provided.
+        RuntimeError: If Ollama returns a malformed response or wrong vector count.
+    """
+    values = [inputs] if isinstance(inputs, str) else inputs
+    if not values or any(not value.strip() for value in values):
+        raise ValueError("Embedding input must contain non-empty text.")
+    request = EmbeddingRequest(model=MODEL, input=inputs)
+    try:
+        response = EmbeddingResponse.model_validate(
+            post_json("/api/embed", request.model_dump())
+        )
+    except ValidationError as exc:
+        locations = ", ".join(
+            ".".join(str(part) for part in error["loc"])
+            for error in exc.errors(include_input=False)
+        )
+        raise RuntimeError(f"Ollama embedding response failed validation at: {locations}.") from exc
+    if len(response.embeddings) != len(values):
+        raise RuntimeError(
+            f"Ollama returned {len(response.embeddings)} vectors for {len(values)} inputs."
+        )
+    return response.embeddings
 
 
 def model_digest() -> str | None:
@@ -67,9 +132,7 @@ def main() -> None:
     if args.batch_size < 1 or args.batch_size > 32:
         parser.error("--batch-size must be between 1 and 32")
 
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise SystemExit("Set DATABASE_URL to the PostgreSQL database.")
+    database_url = settings.database_url.get_secret_value()
     digest = model_digest()
     limit_sql = " LIMIT %s" if args.limit is not None else ""
     existing_filter = "" if args.force else """
@@ -104,12 +167,7 @@ def main() -> None:
         for offset in range(0, len(products), args.batch_size):
             batch = products[offset : offset + args.batch_size]
             texts = [document_text(title, description) for _, title, description in batch]
-            result = post_json("/api/embed", {"model": MODEL, "input": texts})
-            vectors = result.get("embeddings", [])
-            if len(vectors) != len(batch):
-                raise RuntimeError(
-                    f"Ollama returned {len(vectors)} vectors for {len(batch)} products."
-                )
+            vectors = embed_texts(texts)
             for vector in vectors:
                 if dimensions is None:
                     dimensions = len(vector)
