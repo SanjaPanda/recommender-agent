@@ -12,61 +12,16 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 from agent.config import ROOT, settings
 from . import APPAREL_CATEGORY, CATALOG_WRITE_LOCK
+from .source import Manifest, local_asset, load_manifest
 
 SOURCE_ROOTS = {"Clothing, Shoes & Jewelry", "Clothing_Shoes_and_Jewelry"}
-
-
-class Manifest(BaseModel):
-    """Versioned local source decision, bounded scan and image inventory.
-
-    Paths are relative to the manifest directory. Image entries are indexed by
-    parent_asin and contain local_path and the selected upstream source_url.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    source_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
-    source_name: str = Field(min_length=1)
-    revision: str = Field(min_length=1)
-    source_url: str = Field(min_length=1)
-    rights_status: Literal["permitted", "personal_use", "authored"]
-    rights_evidence: str = Field(min_length=1)
-    records: str
-    images: dict[str, dict[str, str]]
-    source_lines: dict[str, PositiveInt] = Field(default_factory=dict)
-    max_products: int = Field(default=2000, ge=1, le=2000)
-    max_lines: int = Field(default=100000, ge=1, le=100000)
-    max_bytes: int = Field(default=250_000_000, ge=1, le=250_000_000)
-    quality_policy: Literal["evidence-v2"] | None = None
-    min_description_words: int = Field(default=50, ge=50)
-
-    @model_validator(mode="after")
-    def require_pinned_source(self) -> "Manifest":
-        """Reject blank provenance and mutable revision aliases."""
-        for value in (self.source_id, self.source_name, self.revision, self.source_url, self.rights_evidence):
-            if not value.strip():
-                raise ValueError("Source provenance must not be blank")
-        if self.revision.lower() in {"main", "master", "latest"}:
-            raise ValueError("Use an immutable source revision")
-        return self
-
-
-def local_asset(root: Path, relative: str) -> Path:
-    """Resolve a local file within root, rejecting traversal and symlink escapes."""
-    path = Path(relative)
-    resolved = (root / path).resolve()
-    if path.is_absolute() or ".." in path.parts or not resolved.is_relative_to(root.resolve()):
-        raise ValueError("asset_path")
-    if not resolved.is_file():
-        raise ValueError("missing_asset")
-    return resolved
 
 
 def string_list(value: Any) -> list[str]:
@@ -113,7 +68,7 @@ def historical_price(value: Any) -> Decimal | None:
 def normalize_metadata(row: dict[str, Any], min_description_words: int = 50, quality_policy: str | None = None) -> dict[str, Any]:
     """Validate apparel source fields before spending network or decode work.
 
-    Returns normalized database fields except image and source provenance. Raw
+    Returns plain Python fields except image, extraction and source provenance. Raw
     upstream fields are preserved with the apparel taxonomy key.
     """
     asin, title = row.get("parent_asin"), row.get("title")
@@ -154,25 +109,26 @@ def normalize_metadata(row: dict[str, Any], min_description_words: int = 50, qua
         if failures:
             raise ValueError(failures[0])
     brand = details.get("Brand")
-    from .attributes import extract
     return {
         "source_product_id": asin, "title": title.strip(), "description": description,
         "brand": brand.strip() if isinstance(brand, str) and brand.strip() else None,
-        "category": category, "raw_source": Jsonb({**row, "ground_truth_category": category}),
-        "features": Jsonb(features), "attributes": Jsonb({"schema_version": 1, "attributes": details,
-                                                        "extraction": extract(row)}),
+        "category": category, "raw_source": {**row, "ground_truth_category": category},
+        "features": features, "attributes": {"schema_version": 1, "attributes": details},
         "historical_price_usd": historical_price(row.get("price")),
     }
 
 
 def normalize(row: dict[str, Any], manifest: Manifest, root: Path) -> dict[str, Any]:
-    """Validate source facts and one decoded image; return database parameters.
+    """Validate source facts/image and extract evidence; return plain product fields.
 
     Rejects unsupported taxonomy, incomplete descriptions/details and unsafe or
     invalid local images. No model is called and no missing facts are generated.
     """
     product = normalize_metadata(row, manifest.min_description_words, manifest.quality_policy)
-    return attach_image(product, row, manifest, root)
+    product = attach_image(product, row, manifest, root)
+    from .attributes import extract
+    product["attributes"]["extraction"] = extract(row)
+    return product
 
 
 def attach_image(product: dict[str, Any], row: dict[str, Any], manifest: Manifest, root: Path) -> dict[str, Any]:
@@ -214,8 +170,8 @@ def attach_image(product: dict[str, Any], row: dict[str, Any], manifest: Manifes
     image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
     return {
         **product, "id": f"{manifest.source_id}:{asin}",
-        "image": Jsonb({"local_path": asset["local_path"], "source_url": asset["source_url"],
-                        "sha256": image_hash, "width": width, "height": height}),
+        "image": {"local_path": asset["local_path"], "source_url": asset["source_url"],
+                  "sha256": image_hash, "width": width, "height": height},
         "source_name": manifest.source_name, "dataset_source_id": manifest.source_id,
         "image_sha256": image_hash,
     }
@@ -262,7 +218,8 @@ def _upsert_product(connection: psycopg.Connection, product: dict[str, Any]) -> 
         sql.SQL(",").join(sql.Placeholder(key) for key in columns),
         sql.SQL(",").join(sql.SQL("{}=EXCLUDED.{}").format(sql.Identifier(key), sql.Identifier(key))
                          for key in columns if key != "id"),
-    ), product)
+    ), {key: Jsonb(value) if key in {"raw_source", "features", "attributes", "image"} else value
+        for key, value in product.items()})
 
 
 def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any]:
@@ -273,9 +230,7 @@ def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any
     source IDs cannot be reused with different revision/curation decisions.
     """
     connection.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_WRITE_LOCK,))
-    if manifest_path.stat().st_size > 2_000_000:
-        raise ValueError("manifest_byte_limit")
-    manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest = load_manifest(manifest_path)
     root = manifest_path.parent.resolve()
     records = local_asset(root, manifest.records)
     _register_source(connection, manifest)

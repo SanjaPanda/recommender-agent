@@ -8,15 +8,14 @@ from __future__ import annotations
 
 import argparse
 import time
-from typing import Any
 
 import psycopg
 from pgvector.psycopg import register_vector
-from pgvector import Vector
 
 from agent.config import settings
 from agent.tools.embeddings import MODEL, document_text, embed_texts, model_digest
 from . import CATALOG_WRITE_LOCK
+from .embedding_store import pending_clause, store_batch
 
 def main() -> None:
     """Embed catalogue product text and upsert model-versioned vectors."""
@@ -33,16 +32,7 @@ def main() -> None:
     database_url = settings.database_url.get_secret_value()
     digest = model_digest()
     limit_sql = " LIMIT %s" if args.limit is not None else ""
-    existing_filter = "" if args.force else """
-        AND NOT EXISTS (
-            SELECT 1 FROM product_embeddings e
-            WHERE e.product_id = p.id AND e.modality = 'text'
-              AND e.model_name = %s AND e.model_version = %s AND e.status = 'ready'
-        )
-    """
-    select_params: list[Any] = []
-    if not args.force:
-        select_params.extend([MODEL, digest])
+    existing_filter, select_params = pending_clause("text", MODEL, digest, args.force)
     if args.limit is not None:
         select_params.append(args.limit)
     query = """
@@ -72,20 +62,8 @@ def main() -> None:
                     dimensions = len(vector)
                 elif len(vector) != dimensions:
                     raise RuntimeError("Ollama returned inconsistent embedding dimensions.")
-            with connection.transaction():
-                for (product_id, _, _, _), vector in zip(batch, vectors, strict=True):
-                    connection.execute(
-                        """
-                        INSERT INTO product_embeddings
-                            (product_id, modality, model_name, model_version, embedding, status, error)
-                        VALUES (%s, 'text', %s, %s, %s, 'ready', NULL)
-                        ON CONFLICT (product_id, modality, model_name) DO UPDATE SET
-                            model_version = EXCLUDED.model_version,
-                            embedding = EXCLUDED.embedding,
-                            status = 'ready', error = NULL, updated_at = now()
-                        """,
-                        (product_id, MODEL, digest, Vector(vector)),
-                    )
+            store_batch(connection, (row[0] for row in batch), vectors,
+                        modality="text", model=MODEL, revision=digest)
             processed += len(batch)
             print(f"Embedded {processed}/{len(products)} products")
 

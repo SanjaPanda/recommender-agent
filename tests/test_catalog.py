@@ -46,9 +46,9 @@ class CatalogTests(unittest.TestCase):
         product = normalize(self.row, self.manifest, self.root)
         self.assertEqual(product["brand"], "Fixture Brand")
         self.assertEqual(product["category"], "Apparel & Accessories > Clothing")
-        self.assertEqual(product["features"].obj, self.row["features"])
-        self.assertEqual(product["raw_source"].obj["details"], self.row["details"])
-        self.assertEqual(product["image"].obj["width"], 224)
+        self.assertEqual(product["features"], self.row["features"])
+        self.assertEqual(product["raw_source"]["details"], self.row["details"])
+        self.assertEqual(product["image"]["width"], 224)
 
     def test_real_fashion_domain_requires_explicit_apparel_category_root(self):
         self.row['main_category'] = 'AMAZON FASHION'
@@ -209,3 +209,38 @@ class CatalogDatabaseTests(unittest.TestCase):
         self.assertEqual(report["scanned"], 0)
         self.assertEqual(report["stop_reason"], "line_or_byte_limit")
         self.assertEqual(report["deficit"], self.config.get("max_products", 2000))
+
+
+    def test_vector_storage_preserves_revisions_modalities_and_batch_rollback(self):
+        from pgvector.psycopg import register_vector
+        from rag.embedding_store import pending_clause, store_batch
+        register_vector(self.connection)
+        ingest(self.connection, self.root / "manifest.json")
+        product_id = self.config["source_id"] + ":AUTHORED1"
+
+        def pending(modality="text", revision="revision-1", force=False):
+            clause, params = pending_clause(modality, "authored-model", revision, force)
+            return self.connection.execute(
+                "SELECT p.id FROM products p WHERE p.id=%s" + clause,
+                [product_id, *params],
+            ).fetchall()
+
+        self.assertEqual(pending(), [(product_id,)])
+        store_batch(self.connection, [product_id], [[3., 4.]], modality="text",
+                    model="authored-model", revision="revision-1")
+        self.assertEqual(pending(), [])
+        self.assertEqual(pending("image"), [(product_id,)])
+        self.assertEqual(pending(revision="revision-2"), [(product_id,)])
+        self.assertEqual(pending(force=True), [(product_id,)])
+        with self.assertRaises(ValueError):
+            store_batch(self.connection, [product_id, product_id], [[9., 12.]], modality="text",
+                        model="authored-model", revision="revision-2")
+        stored = self.connection.execute(
+            "SELECT model_version,embedding::real[] FROM product_embeddings "
+            "WHERE product_id=%s AND model_name='authored-model'", (product_id,),
+        ).fetchone()
+        self.assertEqual(stored, ("revision-1", [3., 4.]))
+        store_batch(self.connection, [product_id], [[6., 8.]], modality="text",
+                    model="authored-model", revision="revision-2")
+        self.assertEqual(pending(revision="revision-2"), [])
+        self.assertEqual(pending(), [(product_id,)])

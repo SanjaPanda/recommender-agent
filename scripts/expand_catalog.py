@@ -16,7 +16,8 @@ import shutil
 import psycopg
 
 from agent.config import settings
-from rag.catalog import ROOT, Manifest, ingest
+from rag.catalog import ROOT, ingest
+from rag.source import load_manifest
 from rag.download_catalog import download_catalog
 from rag import CATALOG_WRITE_LOCK
 
@@ -32,6 +33,24 @@ def _write_json(path: Path, value: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(path)
+
+
+def _prepare_publication(active: Path, stage: Path) -> None:
+    """Copy new images and fsync metadata replacements before database mutation.
+
+    Existing images remain available. Staged image provenance and decoding are
+    checked by ingest inside the subsequent transaction. Prepared files are
+    reproducible from the journal's hash-verified stage after interruption.
+    """
+    for image in (stage / 'images').iterdir():
+        target = active / 'images' / image.name
+        if not target.exists():
+            shutil.copy2(image, target)
+    for name in PROMOTED_FILES:
+        temporary = active / (name + '.next')
+        shutil.copy2(stage / name, temporary)
+        with temporary.open('r+b') as stream:
+            os.fsync(stream.fileno())
 
 
 def promote_catalog(active: Path, stage: Path | None = None) -> dict:
@@ -82,17 +101,7 @@ def promote_catalog(active: Path, stage: Path | None = None) -> dict:
                 if (active / name).exists():
                     shutil.copy2(active / name, backup / name)
             pending['hashes'] = hashes
-        # Verify and copy assets before any database mutation. Existing images
-        # stay available; normalize()/ingest() verify staged asset contents.
-        for image in (stage / 'images').iterdir():
-            target = active / 'images' / image.name
-            if not target.exists():
-                shutil.copy2(image, target)
-        for name in PROMOTED_FILES:
-            temporary = active / (name + '.next')
-            shutil.copy2(stage / name, temporary)
-            with temporary.open('r+b') as stream:
-                os.fsync(stream.fileno())
+        _prepare_publication(active, stage)
         if not journal.exists():
             _write_json(journal, pending)
         with connection.transaction():
@@ -116,7 +125,7 @@ def main() -> None:
         print(json.dumps(promote_catalog(active, args.staged), indent=2), flush=True)
         print('Recovered promotion. Run the existing text/image embedding commands next.', flush=True)
         return
-    seed = Manifest.model_validate_json((active / "manifest.json").read_text(encoding="utf-8"))
+    seed = load_manifest(active / "manifest.json")
     if len(seed.images) >= 2000 and args.staged is None:
         print("Catalog already contains 2,000 images; no acquisition needed.")
         return

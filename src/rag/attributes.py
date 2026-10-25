@@ -203,38 +203,28 @@ def enrich(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any
     raw source, vectors and runtime filters are not modified. Repeated extraction
     overwrites only the versioned extraction document, without duplicating it.
     """
-    from .catalog import Manifest, local_asset
+    from .source import load_manifest, records
 
-    if manifest_path.stat().st_size > 2_000_000:
-        raise ValueError("Manifest exceeds 2 MB")
-    manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest = load_manifest(manifest_path)
     products = []
-    total_bytes = 0
-    with local_asset(manifest_path.parent, manifest.records).open("rb") as stream:
-        for _ in range(manifest.max_lines):
-            line = stream.readline(min(1_000_000, manifest.max_bytes - total_bytes) + 1)
-            if not line:
-                break
-            total_bytes += len(line)
-            if total_bytes > manifest.max_bytes or len(line) > 1_000_000:
-                raise ValueError("Input exceeds manifest budget")
-            row = json.loads(line)
-            if not isinstance(row, dict) or not isinstance(row.get("parent_asin"), str):
-                raise ValueError("Expected product metadata")
-            product_id = manifest.source_id + ":" + row["parent_asin"]
-            stored = connection.execute(
-                "SELECT attributes,source_record_sha256 FROM products "
-                "WHERE id=%s AND dataset_source_id=%s FOR UPDATE", (product_id, manifest.source_id),
-            ).fetchone()
-            if stored is None or stored[1] != hashlib.sha256(line).hexdigest():
-                raise ValueError("Imported source record does not match extraction input")
-            evidence = extract(row)
-            attributes = dict(stored[0] or {"schema_version": 1, "attributes": {}})
-            attributes["extraction"] = evidence
-            connection.execute("UPDATE products SET attributes=%s WHERE id=%s", (Jsonb(attributes), product_id))
-            products.append({"product_id": row["parent_asin"], **evidence})
-            if len(products) >= manifest.max_products:
-                break
+    for line in records(manifest_path, manifest):
+        row = json.loads(line)
+        if not isinstance(row, dict) or not isinstance(row.get("parent_asin"), str):
+            raise ValueError("Expected product metadata")
+        product_id = manifest.source_id + ":" + row["parent_asin"]
+        stored = connection.execute(
+            "SELECT attributes,source_record_sha256 FROM products "
+            "WHERE id=%s AND dataset_source_id=%s FOR UPDATE", (product_id, manifest.source_id),
+        ).fetchone()
+        if stored is None or stored[1] != hashlib.sha256(line).hexdigest():
+            raise ValueError("Imported source record does not match extraction input")
+        evidence = extract(row)
+        attributes = dict(stored[0] or {"schema_version": 1, "attributes": {}})
+        attributes["extraction"] = evidence
+        connection.execute("UPDATE products SET attributes=%s WHERE id=%s", (Jsonb(attributes), product_id))
+        products.append({"product_id": row["parent_asin"], **evidence})
+        if len(products) >= manifest.max_products:
+            break
     fields = Counter()
     for product in products:
         fields.update({candidate["field"] for candidate in product["candidates"]})

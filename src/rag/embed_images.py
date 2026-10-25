@@ -11,12 +11,12 @@ import time
 from typing import Any
 
 import psycopg
-from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from agent.config import ROOT, settings
 from . import CATALOG_WRITE_LOCK
-from .catalog import local_asset
+from .source import local_asset
+from .embedding_store import pending_clause, store_batch
 
 MODEL = settings.image_embedding_model
 
@@ -56,13 +56,7 @@ def main() -> None:
         raise RuntimeError('CLIP model has no immutable revision; install a versioned snapshot before embedding.')
     processor = CLIPProcessor.from_pretrained(MODEL, revision=digest)
     limit_clause = " LIMIT %s" if args.limit is not None else ""
-    existing_clause = "" if args.force else """
-        AND NOT EXISTS (
-            SELECT 1 FROM product_embeddings e
-            WHERE e.product_id = p.id AND e.modality = 'image'
-              AND e.model_name = %s AND e.model_version = %s AND e.status = 'ready'
-        )
-    """
+    existing_clause, version_params = pending_clause("image", MODEL, digest, args.force)
     params: list[Any] = []
     category_clause = ""
     if args.ground_truth_category_prefix:
@@ -71,8 +65,7 @@ def main() -> None:
             for _ in args.ground_truth_category_prefix
         ) + ")"
         params.extend(prefix + "%" for prefix in args.ground_truth_category_prefix)
-    if not args.force:
-        params.extend([MODEL, digest])
+    params.extend(version_params)
     if args.limit is not None:
         params.append(args.limit)
 
@@ -109,26 +102,19 @@ def main() -> None:
                     invalid += 1
             if not valid:
                 continue
-            inputs = processor(images=[image for _, image in valid], return_tensors="pt")
-            with torch.inference_mode():
-                vectors = model.get_image_features(**inputs).cpu().tolist()
-            # Normalize for cosine similarity and make rows durable per batch.
-            with connection.transaction():
-                for (product_id, image), vector in zip(valid, vectors, strict=True):
+            try:
+                inputs = processor(images=[image for _, image in valid], return_tensors="pt")
+                with torch.inference_mode():
+                    vectors = model.get_image_features(**inputs).cpu().tolist()
+                # Image vectors are normalized; Nomic text vectors remain raw.
+                normalized = []
+                for vector in vectors:
                     norm = sum(value * value for value in vector) ** 0.5
-                    normalized = [value / norm for value in vector]
-                    connection.execute(
-                        """
-                        INSERT INTO product_embeddings
-                            (product_id, modality, model_name, model_version, embedding, status, error)
-                        VALUES (%s, 'image', %s, %s, %s, 'ready', NULL)
-                        ON CONFLICT (product_id, modality, model_name) DO UPDATE SET
-                            model_version = EXCLUDED.model_version,
-                            embedding = EXCLUDED.embedding,
-                            status = 'ready', error = NULL, updated_at = now()
-                        """,
-                        (product_id, MODEL, digest, Vector(normalized)),
-                    )
+                    normalized.append([value / norm for value in vector])
+                store_batch(connection, (product_id for product_id, _ in valid), normalized,
+                            modality="image", model=MODEL, revision=digest)
+            finally:
+                for _, image in valid:
                     image.close()
             processed += len(valid)
             print(f"Embedded {processed}/{len(rows)} candidate products")

@@ -22,7 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from .catalog import Manifest, ROOT, normalize, normalize_metadata, attach_image
+from .catalog import ROOT, normalize_metadata, attach_image
+from .source import Manifest, load_manifest, local_asset, records as source_records
 
 METADATA_HOSTS = frozenset({"huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.hf.co",
                             "cas-bridge.xethub.hf.co", "us.aws.cdn.hf.co"})
@@ -177,6 +178,36 @@ def _download_product_image(row: dict[str, Any], product: dict[str, Any], plan: 
     return None
 
 
+def _seed_products(plan: Manifest, root: Path, seed_root: Path):
+    """Copy validated seed images and yield raw records with original provenance.
+
+    Rejects mismatched source policy, incomplete inventories and seeds larger
+    than the requested target. Source bytes are not decoded and reserialized.
+    Evidence extraction is deferred to database import, as for new acquisition.
+    """
+    seed_path = seed_root / "manifest.json"
+    seed = load_manifest(seed_path)
+    operational = {"images", "source_lines", "max_products", "max_lines", "max_bytes"}
+    if seed.model_dump(exclude=operational) != plan.model_dump(exclude=operational):
+        raise ValueError("Seed provenance and curation must match the expansion plan")
+    count = 0
+    for line in source_records(seed_path, seed):
+        count += 1
+        if count > plan.max_products:
+            raise ValueError("Seed exceeds target")
+        row = json.loads(line)
+        product = normalize_metadata(row, seed.min_description_words, seed.quality_policy)
+        product = attach_image(product, row, seed, seed_root)
+        asin = product["source_product_id"]
+        asset = seed.images[asin]
+        source = local_asset(seed_root, asset["local_path"])
+        target = root / "images" / source.name
+        shutil.copy2(source, target)
+        yield line, product, {**asset, "local_path": "images/" + target.name}, seed.source_lines[asin]
+    if count != len(seed.images):
+        raise ValueError("Seed records do not match image inventory")
+
+
 def download_catalog(plan: Manifest, root: Path, *, seed_root: Path | None = None) -> dict[str, Any]:
     """Scan a pinned source and write bounded importer assets, optionally extending a seed.
 
@@ -212,29 +243,17 @@ def download_catalog(plan: Manifest, root: Path, *, seed_root: Path | None = Non
     samples: list[dict[str, Any]] = []
     seed_lines: list[bytes] = []
     if seed_root is not None:
-        seed = Manifest.model_validate_json((seed_root / "manifest.json").read_text(encoding="utf-8"))
-        operational = {"images", "source_lines", "max_products", "max_lines", "max_bytes"}
-        if seed.model_dump(exclude=operational) != plan.model_dump(exclude=operational):
-            raise ValueError("Seed provenance and curation must match the expansion plan")
-        for line in (seed_root / seed.records).read_bytes().splitlines(keepends=True):
-            row = json.loads(line)
-            product = normalize(row, seed, seed_root)
+        for line, product, asset, source_line in _seed_products(plan, root, seed_root):
             asin = product["source_product_id"]
-            asset = seed.images[asin]
-            source = (seed_root / asset["local_path"]).resolve()
-            target = root / "images" / source.name
-            shutil.copy2(source, target)
-            images[asin] = {**asset, "local_path": "images/" + target.name}
-            source_lines[asin] = seed.source_lines[asin]
+            images[asin] = asset
+            source_lines[asin] = source_line
             seen_ids.add(asin)
             seen_titles.add((" ".join(product["title"].casefold().split()), product["brand"]))
-            seen_hashes.add(hashlib.sha256(source.read_bytes()).hexdigest())
+            seen_hashes.add(product["image_sha256"])
             seed_lines.append(line if line.endswith(b"\n") else line + b"\n")
             report["accepted"] += 1
             report["categories"][product["category"]] += 1
         report["seeded"] = len(seed_lines)
-        if len(seed_lines) > plan.max_products:
-            raise ValueError("Seed exceeds target")
     try:
         with open_remote(plan.source_url, METADATA_HOSTS) as response, (root / "records.partial").open("wb") as records, (root / "rejections.jsonl").open("w", encoding="utf-8") as rejected:
             records.writelines(seed_lines)
@@ -295,7 +314,7 @@ def download_catalog(plan: Manifest, root: Path, *, seed_root: Path | None = Non
                     accepted = _download_product_image(row, product, plan, root, report, deadline, seen_hashes)
                     if accepted is None:
                         raise ValueError("no_valid_image")
-                    images[asin] = {key: accepted['image'].obj[key] for key in ('local_path', 'source_url')}
+                    images[asin] = {key: accepted['image'][key] for key in ('local_path', 'source_url')}
                     seen_ids.add(asin)
                     seen_titles.add(title_key)
                     records.write(line)
@@ -304,10 +323,10 @@ def download_catalog(plan: Manifest, root: Path, *, seed_root: Path | None = Non
                     report["categories"][product["category"]] += 1
                     samples.append({"product_id": asin, "source_line": report["scanned"],
                                     "description_words": len(re.findall(r"\b\w+\b", product["description"])),
-                                    "attribute_keys": sorted(product["attributes"].obj["attributes"]),
+                                    "attribute_keys": sorted(product["attributes"]["attributes"]),
                                     "has_price": product["historical_price_usd"] is not None,
-                                    "image_width": accepted["image"].obj["width"],
-                                    "image_height": accepted["image"].obj["height"]})
+                                    "image_width": accepted["image"]["width"],
+                                    "image_height": accepted["image"]["height"]})
                 except (ValueError, UnicodeDecodeError) as exc:
                     reason = str(exc) if re.fullmatch(r"[a-z_]+", str(exc)) else "invalid_record"
                     report["rejected"][reason] += 1

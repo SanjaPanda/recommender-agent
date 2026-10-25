@@ -126,26 +126,17 @@ def assess(row: dict[str, Any], min_words: int = 50) -> dict[str, Any]:
 
 def report_quality(manifest_path: Path) -> dict[str, Any]:
     """Assess a bounded local accepted-file manifest and write a private report."""
-    from .catalog import Manifest, local_asset
+    from .source import load_manifest, records
 
-    manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-    records = local_asset(manifest_path.parent, manifest.records)
+    manifest = load_manifest(manifest_path)
     products = []
-    consumed = 0
-    with records.open("rb") as stream:
-        for _ in range(manifest.max_lines):
-            line = stream.readline(min(1_000_000, manifest.max_bytes - consumed) + 1)
-            if not line:
-                break
-            consumed += len(line)
-            if consumed > manifest.max_bytes or len(line) > 1_000_000:
-                raise ValueError("Quality report input exceeds manifest limits")
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError("Expected metadata objects")
-            products.append(assess(row, manifest.min_description_words))
-            if len(products) >= manifest.max_products:
-                break
+    for line in records(manifest_path, manifest):
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("Expected metadata objects")
+        products.append(assess(row, manifest.min_description_words))
+        if len(products) >= manifest.max_products:
+            break
     failures = Counter(reason for product in products for reason in product["failures"])
     report = {"policy": "evidence-v2", "source_id": manifest.source_id, "assessed": len(products),
               "review_ready": sum(product["review_ready"] for product in products),
