@@ -6,6 +6,18 @@ from rag.embed_text import embed_texts
 
 
 class EmbeddingContractTests(unittest.TestCase):
+    def test_cpu_override_is_explicit_and_provider_default_remains_optional(self):
+        response = {'model': 'nomic-embed-text', 'embeddings': [[1., 0.]]}
+        for gpu in (None, 0):
+            with self.subTest(gpu=gpu), patch('rag.embed_text.settings.embedding_num_gpu', gpu), \
+                 patch('rag.embed_text.post_json', return_value=response) as call:
+                embed_texts('shirt')
+                payload = call.call_args.args[1]
+                if gpu is None:
+                    self.assertNotIn('options', payload)
+                else:
+                    self.assertEqual(payload['options'], {'num_gpu': 0})
+
     def test_single_and_batched_inputs_use_validated_vectors(self):
         with patch('rag.embed_text.post_json', return_value={
             'model': 'nomic-embed-text', 'embeddings': [[1.0, 0.0], [0.0, 1.0]],

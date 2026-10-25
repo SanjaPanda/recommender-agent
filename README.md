@@ -1,64 +1,33 @@
-# Apparel Recommender Agent
+# Multimodal Product Discovery
 
-A local apparel discovery app for **2,173** Apparel & Accessories products. It combines deterministic PostgreSQL filters, Nomic product-text retrieval, CLIP image retrieval, one LangGraph agent, Ollama structured outputs, and an A2UI product gallery.
+Local apparel discovery with a 2,000-product private Amazon catalog. BM25 searches listing title, description and all feature bullets; weighted RRF combines keyword, Nomic text and CLIP image rankings. Cards retain similarity percentages, explicit listing checks, source details and a per-signal RRF breakdown. Retrieval quality has not been measured on a held-out judged benchmark.
 
-## Run locally
+The existing application remains: FastAPI, one LangGraph workflow, PostgreSQL/pgvector, Ollama, CLIP and a Next.js/A2UI interface. Docker Compose runs the database and web UI; Python API and Ollama run on the host.
 
-Requirements: Python 3.12, `uv`, Docker Desktop, and Ollama. Copy `.env.example` to `.env`, set a local PostgreSQL password, then install and start:
+See [setup](docs/SETUP.md), [current architecture](docs/architecture.md), [agent behavior](docs/Agent.md), and [database state](docs/database.md).
+
+## Development
 
 ```powershell
 uv sync --extra image
 docker compose up -d db
 uv run python scripts/db/apply_migrations.py
-uv run python scripts/db/ingest_sample.py
-uv run python -m rag.embed_text
-uv run python -m rag.embed_images
-```
-
-Pull the configured Ollama model and text embedder once:
-
-```powershell
-ollama pull gemma3:4b
-ollama pull nomic-embed-text
-```
-
-The CLIP model is loaded from the local Hugging Face cache at request time. Download/cache `openai/clip-vit-base-patch32` before running the app; request handling never downloads model files. If CLIP files are unavailable, retrieval falls back to product text.
-
-Start the API and UI in separate terminals:
-
-```powershell
 uv run recommender-agent-api
 docker compose up -d --build web
 ```
 
-Open <http://localhost:3000>. The UI displays relevance-gated product cards, accepts visual selections, lets the user refine preferences, and exposes a per-turn agent trace. If no strong products match, it explains that and shows the closest alternatives in the selected category. `#buynew` starts a fresh apparel search while keeping the cart.
-
-## Dataset and database
-
-The importer reads the pinned train and test samples under ignored `.data/` and rejects every record outside the `Apparel & Accessories` taxonomy. The current files contain 2,173 unique apparel records: 1,705 train and 468 test. Their deterministic IDs match the retained database apparel IDs. The importer upserts by product ID and is safe to rerun.
-
-If the samples are absent, fetch apparel-only splits. The versioned content-identity map in `data/apparel_product_ids.json` preserves the existing 2,173 source IDs, including IDs inherited from the original sample:
-
-```powershell
-uv run python scripts/data/fetch_sample.py --rows 50000 --split train --output-dir .data/shopify-selected-train
-uv run python scripts/data/fetch_sample.py --rows 50000 --split test --output-dir .data/shopify-selected-test
-```
-
-Database schema, backup/cleanup procedure, row counts, and retained objects are in [database notes](docs/database.md). The product source does not provide a reliable price field; price and budget filters are unsupported.
-
-## Search and validation
-
-Inspect the same retrieval path used by the agent:
-
-```powershell
-uv run recommender-search "blue cotton dress" --limit 5
-uv run recommender-search "lightweight jacket" --reference-product-id PRODUCT_ID --limit 5
-```
-
-Run offline tests:
+Configure `.env` using `.env.example` first. Open <http://localhost:3000>. The database contains 2,000 products with validated local images, 2,000 ready Nomic text vectors and 2,000 ready CLIP image vectors. Use the database inspection command in setup to verify the local state. Search results expose BM25 and RRF scores in **Similarity details**. Product-type and material relevance limitations remain.
 
 ```powershell
 .venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
 
-See [setup and troubleshooting](docs/SETUP.md), [agent behavior](docs/Agent.md), and [architecture](docs/architecture.md).
+The new local Amazon-shaped pilot importer is documented in [setup](docs/SETUP.md#curated-local-pilot-importer). A [bounded downloader](docs/SETUP.md#bounded-downloader-and-pilot-report) is implemented; the private catalog has expanded from 50 to 2,000 records under the same recorded personal-use decision. This is a bounded sequential sample; representativeness and independently judged ranking quality remain unmeasured. The existing Shopify fetch/import utilities are retained for compatibility, but are not the new dataset pipeline. Do not run them as part of normal setup. User article drafts under `.medium/` are independent work and were preserved. Superseded engineering records are under `observations/archive/`, excluded from current project guidance.
+
+
+Audit fixes reconcile color follow-ups, reject incomplete compound interpretations,
+constrain phrase evidence to primary title segments, enforce vector revisions and
+dimensions, and prevent overlapping session turns from holding long transactions.
+Changed catalog snapshots invalidate historical scores; expansion interruptions can
+be recovered using the journal described in setup. These safeguards are tested
+contracts, not evidence of judged relevance accuracy or a latency speedup.

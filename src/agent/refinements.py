@@ -30,6 +30,23 @@ def color_refinement(previous: Plan, message: str) -> Plan | None:
     if subject and subject[1] not in COLORS:
         plan.filters.title_product = subject[1]
     plan.filters.title_color = None if clear else match['color']
+    # Override the effective request too: retaining "blue dress" while adding a
+    # black SQL filter makes the independent relevance gate require both colors.
+    color_words = r'\b(?:' + '|'.join(COLORS) + r')\b'
+    def strip_colors(value: str) -> str:
+        """Remove overridden color clauses, preserving other product requirements."""
+        value = re.sub(r'\b(?:not|no|without|never|exclude|avoid)\s+' + color_words,
+                       '', value, flags=re.I)
+        value = re.sub(r'\b(?:in\s+)?' + color_words, '', value, flags=re.I)
+        return ' '.join(value.split()).strip(' ,;')
+
+    plan.query = strip_colors(plan.query)
+    preferences = []
+    for preference in plan.preferences:
+        requirement = strip_colors(preference.requirement)
+        if requirement:
+            preferences.append(preference.model_copy(update={'requirement': requirement}))
+    plan.preferences = preferences
     if match and match['count']:
         plan.result_limit = COUNTS[match['count']]
     return plan

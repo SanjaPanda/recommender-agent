@@ -1,4 +1,7 @@
-"""Idempotently import the local JSONL sample into PostgreSQL."""
+"""Idempotently import the local JSONL sample into PostgreSQL.
+
+Compatibility only: ``uv run python scripts/db/ingest_sample.py --limit 10``
+reads existing private Shopify samples and writes products; not active setup."""
 from __future__ import annotations
 
 import argparse

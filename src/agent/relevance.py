@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 import re
 from typing import Any
+from rag.product_types import product_type, requested_product_type
+from rag.phrases import phrase_in_title
 
 
 TEXT_SIMILARITY_MIN = 0.61
@@ -37,6 +39,7 @@ def is_relevant_product(
     required_title_color: str | None = None,
     required_product_type: str | None = None,
     ignore_query_attributes: bool = False,
+    product_phrase: str | None = None,
 ) -> bool:
     """Decide whether one ranked product is strong enough to call a match.
 
@@ -57,12 +60,20 @@ def is_relevant_product(
     description = product.get("description") or ""
     title_tokens = _tokens(title)
     all_tokens = title_tokens | _tokens(description)
+    # Feature words support lexical intent; colors retain the existing evidence rules.
+    feature_tokens = _tokens(" ".join(feature for feature in product.get("features", [])
+                                     if isinstance(feature, str)))
     lexical_match = False
     excluded_colors = _negated_colors(query)
     if excluded_colors & all_tokens:
         return False
+    if product_phrase and not phrase_in_title(title, product_phrase):
+        return False
 
     if not ignore_query_attributes:
+        wanted_type = requested_product_type(query, required_product_type) if product_phrase is None else None
+        if wanted_type and product_type(title) != wanted_type:
+            return False
         colors = _positive_colors(query)
         if required_title_color:
             if required_title_color.casefold() not in title_tokens:
@@ -74,10 +85,14 @@ def is_relevant_product(
                 return False
 
         query_terms = _tokens(query) - COLOR_TERMS - GENERIC_TERMS - excluded_colors
-        if required_product_type:
+        if product_phrase:
+            # The complete product phrase has already been checked in the title.
+            query_terms -= _tokens(product_phrase)
+            lexical_match = True
+        elif required_product_type and product_phrase is None:
             query_terms.add(_canonical(required_product_type.casefold()))
         if query_terms:
-            overlap = query_terms & all_tokens
+            overlap = query_terms & (all_tokens | feature_tokens)
             required_overlap = max(1, math.ceil(len(query_terms) * 0.5))
             if len(overlap) < required_overlap:
                 return False

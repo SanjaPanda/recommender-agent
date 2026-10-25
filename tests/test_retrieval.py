@@ -6,6 +6,12 @@ from rag.retrieval import retrieve_products
 
 
 class RetrievalTests(unittest.TestCase):
+    def setUp(self):
+        for name in ('text_model_version', 'clip_model_version'):
+            version = patch('rag.retrieval.' + name, return_value='test-revision')
+            version.start()
+            self.addCleanup(version.stop)
+
     """Ensure query retrieval uses only product-text and CLIP image vectors."""
 
     def test_query_ranker_searches_text_and_clip_without_caption_modality(self):
@@ -24,6 +30,7 @@ class RetrievalTests(unittest.TestCase):
         connection.execute.side_effect = execute
         with patch("rag.retrieval.psycopg.connect") as connect, \
              patch("rag.retrieval.register_vector"), \
+             patch("rag.retrieval._search_bm25", return_value=[]), \
              patch("rag.retrieval.embed_texts", return_value=[[1.0, 0.0]]), \
              patch("rag.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
             connect.return_value.__enter__.return_value = connection
@@ -48,7 +55,7 @@ class RetrievalTests(unittest.TestCase):
             """Return distinct scores for the example and query-image rankings."""
             nonlocal image_searches
             if "SELECT e.product_id,e.embedding::real[]" in sql:
-                return MagicMock(fetchall=lambda: [("example-1", [1.0, 0.0])])
+                return MagicMock(fetchall=lambda: [("example-1", [1.0, 0.0], "Blue Shirt", "test-revision")])
             modality = params[2]
             similarity = 0.7
             if modality == "image":
@@ -63,6 +70,7 @@ class RetrievalTests(unittest.TestCase):
         connection.execute.side_effect = execute
         with patch("rag.retrieval.psycopg.connect") as connect, \
              patch("rag.retrieval.register_vector"), \
+             patch("rag.retrieval._search_bm25", return_value=[]), \
              patch("rag.retrieval.embed_texts", return_value=[[0.0, 1.0]]), \
              patch("rag.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
             connect.return_value.__enter__.return_value = connection

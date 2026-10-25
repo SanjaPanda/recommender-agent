@@ -2,6 +2,10 @@
 
 Use --list, --case NAME (repeatable), or --all. Defaults to the original case.
 Requires PostgreSQL category metadata and Ollama.
+
+Requires PostgreSQL category metadata and Ollama.
+Run ``uv run python scripts/check_router_edits.py --list`` from the repository
+root to list authored cases without running inference.
 """
 import argparse
 import json

@@ -1,5 +1,6 @@
 """Explicit follow-ups keep context and constrain retrieval before ranking."""
 import unittest
+from agent.models import SearchIntent
 from unittest.mock import patch
 from agent.models import Plan, Filters
 from agent.refinements import color_refinement
@@ -9,6 +10,10 @@ from rag.retrieval import filter_clause
 
 class RefinementTests(unittest.TestCase):
     def setUp(self):
+        # Routing/relevance tests isolate the separately tested LLM extractor.
+        intent_patch = patch('agent.workflow.extract_search_intent', return_value=SearchIntent())
+        intent_patch.start()
+        self.addCleanup(intent_patch.stop)
         self.old = Plan(intent='recommend', query='leash',
             filters=Filters(category_prefixes=['Apparel & Accessories > Clothing']))
 

@@ -1,4 +1,8 @@
-"""Generate local CLIP image embeddings for products with saved image files."""
+"""Generate local CLIP image embeddings for products with saved image files.
+
+Run ``uv run python -m rag.embed_images --help`` from the repository root.
+The normal command reads private product images, loads CLIP and writes
+revisioned PostgreSQL vectors in batches; see docs/SETUP.md."""
 from __future__ import annotations
 
 import argparse
@@ -12,9 +16,11 @@ from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from agent.config import ROOT, settings
+from . import CATALOG_WRITE_LOCK
 
 MODEL = settings.image_embedding_model
 DEFAULT_IMAGE_ROOTS = [
+    ROOT / ".data" / "catalog",
     ROOT / ".data" / "shopify-selected-train",
     ROOT / ".data" / "shopify-selected-test",
 ]
@@ -67,8 +73,10 @@ def main() -> None:
 
     started = time.perf_counter()
     model = CLIPModel.from_pretrained(MODEL).to("cpu").eval()
-    processor = CLIPProcessor.from_pretrained(MODEL)
-    digest = getattr(model.config, "_commit_hash", None) or "main"
+    digest = getattr(model.config, "_commit_hash", None)
+    if not digest:
+        raise RuntimeError('CLIP model has no immutable revision; install a versioned snapshot before embedding.')
+    processor = CLIPProcessor.from_pretrained(MODEL, revision=digest)
     limit_clause = " LIMIT %s" if args.limit is not None else ""
     existing_clause = "" if args.force else """
         AND NOT EXISTS (
@@ -91,6 +99,7 @@ def main() -> None:
         params.append(args.limit)
 
     with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("SELECT pg_advisory_lock(%s)", (CATALOG_WRITE_LOCK,))
         register_vector(connection)
         rows = connection.execute(
             """

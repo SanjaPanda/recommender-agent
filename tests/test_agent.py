@@ -1,5 +1,6 @@
 """Behavioral checks for constraints, routing, retrieval and custom-model failures."""
 import unittest
+from agent.models import SearchIntent
 import json
 from unittest.mock import patch, Mock
 
@@ -19,6 +20,10 @@ PRODUCT = {
 
 class AgentTests(unittest.TestCase):
     def setUp(self):
+        # Routing/relevance tests isolate the separately tested LLM extractor.
+        intent_patch = patch('agent.workflow.extract_search_intent', return_value=SearchIntent())
+        intent_patch.start()
+        self.addCleanup(intent_patch.stop)
         self.request = ExplanationRequest(plan=Plan(intent='recommend'), products=[ProductFacts(id='one')])
 
     def test_model_uses_supplied_timeout(self):

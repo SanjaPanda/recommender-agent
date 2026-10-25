@@ -1,4 +1,9 @@
-"""Generate and store Ollama text embeddings for catalogue products."""
+"""Generate revisioned Nomic product vectors through local Ollama.
+
+Run ``uv run python -m rag.embed_text --help`` from the repository root.
+Normal execution reads PostgreSQL products, calls Ollama and writes vectors in
+batches. Configure services and private assets as documented in docs/SETUP.md.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +19,7 @@ from pgvector.psycopg import register_vector
 from pgvector import Vector
 
 from agent.config import ROOT, settings
+from . import CATALOG_WRITE_LOCK
 
 OLLAMA_URL = settings.ollama_url
 MODEL = settings.embedding_model
@@ -33,12 +39,19 @@ def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"Could not reach Ollama at {OLLAMA_URL}: {exc}") from exc
 
 
+class EmbeddingOptions(BaseModel):
+    """Optional local hardware override; provider defaults otherwise apply."""
+    model_config = ConfigDict(extra="forbid")
+    num_gpu: int = Field(ge=0)
+
+
 class EmbeddingRequest(BaseModel):
     """Typed Ollama text-embedding request."""
 
     model_config = ConfigDict(extra="forbid")
     model: str = Field(min_length=1)
     input: str | list[str] = Field(description="One query/document or a batch of texts.")
+    options: EmbeddingOptions | None = None
 
 
 class EmbeddingResponse(BaseModel):
@@ -82,10 +95,11 @@ def embed_texts(inputs: str | list[str]) -> list[list[float]]:
     values = [inputs] if isinstance(inputs, str) else inputs
     if not values or any(not value.strip() for value in values):
         raise ValueError("Embedding input must contain non-empty text.")
-    request = EmbeddingRequest(model=MODEL, input=inputs)
+    request = EmbeddingRequest(model=MODEL, input=inputs, options=(
+        EmbeddingOptions(num_gpu=settings.embedding_num_gpu) if settings.embedding_num_gpu is not None else None))
     try:
         response = EmbeddingResponse.model_validate(
-            post_json("/api/embed", request.model_dump())
+            post_json("/api/embed", request.model_dump(exclude_none=True))
         )
     except ValidationError as exc:
         locations = ", ".join(
@@ -100,23 +114,35 @@ def embed_texts(inputs: str | list[str]) -> list[list[float]]:
     return response.embeddings
 
 
-def model_digest() -> str | None:
-    """Return the installed embedding model digest or explain how to install it."""
+def model_digest() -> str:
+    """Resolve the exact installed Ollama tag to its immutable digest.
+
+    Untagged names select ``:latest``. Explicit tags and registry host ports
+    are preserved. Raises RuntimeError for invalid metadata and SystemExit if
+    the configured tag is absent. Performs one local metadata request.
+    """
     request = urllib.request.Request(f"{OLLAMA_URL.rstrip('/')}/api/tags")
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             tags = json.load(response)
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"Could not read Ollama model metadata: {exc}") from exc
+    name = MODEL if ':' in MODEL.rsplit('/', 1)[-1] else MODEL + ':latest'
     for model in tags.get("models", []):
-        if model.get("name", "").split(":", 1)[0] == MODEL:
-            return model.get("digest")
+        installed = model.get('name', '')
+        installed = installed if ':' in installed.rsplit('/', 1)[-1] else installed + ':latest'
+        if installed == name:
+            digest = model.get('digest')
+            if not isinstance(digest, str) or not digest:
+                raise RuntimeError('Installed embedding model has no revision digest.')
+            return digest
     raise SystemExit(f"Model {MODEL!r} is not installed. Run: ollama pull {MODEL}")
 
 
-def document_text(title: str | None, description: str | None) -> str:
-    """Format available product text using Nomic's document instruction prefix."""
+def document_text(title: str | None, description: str | None, features: list[str] | None = None) -> str:
+    """Format title, source description and bullet features for Nomic retrieval."""
     parts = [part.strip() for part in (title, description) if part and part.strip()]
+    parts.extend(feature.strip() for feature in (features or []) if isinstance(feature, str) and feature.strip())
     return "search_document: " + "\n".join(parts)
 
 
@@ -148,7 +174,7 @@ def main() -> None:
     if args.limit is not None:
         select_params.append(args.limit)
     query = """
-        SELECT p.id, p.title, p.description
+        SELECT p.id, p.title, p.description, p.features
         FROM products p
         WHERE (NULLIF(trim(p.title), '') IS NOT NULL
                OR NULLIF(trim(p.description), '') IS NOT NULL)
@@ -158,6 +184,7 @@ def main() -> None:
     processed = 0
     dimensions: int | None = None
     with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("SELECT pg_advisory_lock(%s)", (CATALOG_WRITE_LOCK,))
         register_vector(connection)
         products = connection.execute(query, select_params).fetchall()
         if not products:
@@ -166,7 +193,7 @@ def main() -> None:
 
         for offset in range(0, len(products), args.batch_size):
             batch = products[offset : offset + args.batch_size]
-            texts = [document_text(title, description) for _, title, description in batch]
+            texts = [document_text(title, description, features) for _, title, description, features in batch]
             vectors = embed_texts(texts)
             for vector in vectors:
                 if dimensions is None:
@@ -174,7 +201,7 @@ def main() -> None:
                 elif len(vector) != dimensions:
                     raise RuntimeError("Ollama returned inconsistent embedding dimensions.")
             with connection.transaction():
-                for (product_id, _, _), vector in zip(batch, vectors, strict=True):
+                for (product_id, _, _, _), vector in zip(batch, vectors, strict=True):
                     connection.execute(
                         """
                         INSERT INTO product_embeddings

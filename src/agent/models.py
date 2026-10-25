@@ -1,5 +1,5 @@
 """Validated contracts shared by routing, retrieval and responses."""
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +37,26 @@ class Preference(Contract):
     requirement: str = Field(min_length=1, max_length=300, description="User-stated product preference or exclusion.")
     strength: Literal["hard", "soft"] = Field(default="hard", description="Hard constraints require exact support; soft preferences guide ranking.")
     visual: bool = Field(default=False, description="Whether the preference depends on visible appearance.")
+
+
+class SearchAttribute(Contract):
+    """A user-stated attribute, never an inferred catalogue fact."""
+    name: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=1, max_length=300)
+    excluded: bool = False
+
+
+class SearchIntent(Contract):
+    """Open-vocabulary interpretation of a request, separate from SQL filters."""
+    product_phrase: str = Field(default="", max_length=100, description="Exact core product noun phrase from the request. Preserve defining modifiers. Empty when unclear or generic.")
+    search_terms: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=4, description="Short equivalent search phrases, preserving the specific product and all exclusions. No broader substitutes.")
+    attributes: list[SearchAttribute] = Field(default_factory=list, max_length=10)
+
+
+class SearchIntentRequest(Contract):
+    """Bounded effective query sent to local structured intent extraction."""
+    query: str = Field(min_length=1, max_length=5000)
 
 
 class Plan(Contract):

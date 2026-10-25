@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     ollama_url: str = Field(default="http://127.0.0.1:11434", description="Local Ollama HTTP endpoint.")
     agent_model: str = Field(default="gemma3:4b", min_length=1, description="One local Ollama model for routing and optional summaries.")
     embedding_model: str = Field(default="nomic-embed-text", min_length=1, description="Ollama model used for product/query text vectors.")
+    embedding_num_gpu: NonNegativeInt | None = Field(default=None, description="Optional Ollama embedding GPU-layer count; zero selects CPU inference.")
     image_embedding_model: str = Field(default="openai/clip-vit-base-patch32", min_length=1, description="Cached local CLIP model used for product and query image-space vectors.")
     agent_think: bool = Field(default=False, description="Enable Ollama reasoning mode.")
     agent_router_timeout_seconds: float = Field(

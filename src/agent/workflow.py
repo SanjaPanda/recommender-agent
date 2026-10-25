@@ -17,8 +17,15 @@ from .models import AgentTraceEvent, ExplanationRequest, Plan, ProductFacts, Pro
 from .edits import apply_edits
 from .refinements import COLORS, color_refinement
 from .relevance import is_relevant_product
+from .search_intent import extract_search_intent
+from .models import SearchIntent
 
 logger = logging.getLogger(__name__)
+
+
+class SessionBusyError(RuntimeError):
+    """A session is processing another turn, or changed before its save."""
+
 ROUTER_EDIT_CUES = re.compile(
     r"\b(?:actually|instead|also|remove|clear|change|switch|replace|add|prefer|"
     r"without|except|exclude|no|not|never|don't|dont|any|keep|same|new|used|secondhand|"
@@ -46,6 +53,8 @@ class RecommendationState(TypedDict, total=False):
     excluded_count: int
     trace: list[AgentTraceEvent]
     result_kind: str
+    search_intent: dict | None
+    intent_query: str
 
 
 def _route(state: RecommendationState) -> dict:
@@ -77,6 +86,7 @@ def _route(state: RecommendationState) -> dict:
             'categories': categories, 'cart': state.get('cart', [])}
     if reset or (not state.get('plan') and not text and not turn.get('action')):
         return {**base, 'plan': Plan(intent='categories').model_dump(), 'selected_product_ids': [],
+                'search_intent': None, 'intent_query': '',
                 'messages': [], 'recommendations': [], 'query_context': '', 'route': 'respond',
                 'status': 'categories', 'message': 'Choose a category or describe what you want to find.'}
     selected = state.get('selected_product_ids', [])
@@ -216,8 +226,17 @@ def _retrieve(state: RecommendationState) -> dict:
     query = ' '.join(part for part in [plan.query, *(p.requirement for p in plan.preferences)] if part)
     selected = state.get('selected_product_ids', [])
     filters = plan.filters.model_dump()
+    intent = None
+    if query.strip():
+        if state.get('intent_query') == query and state.get('search_intent') is not None:
+            intent = SearchIntent.model_validate(state['search_intent'])
+        else:
+            intent = extract_search_intent(query)
+    interpretation = {'search_intent': intent.model_dump() if intent else None, 'intent_query': query}
+    search_options = ({'product_phrase': intent.product_phrase, 'search_terms': intent.search_terms}
+                      if intent else {})
     if not query.strip() and not selected:
-        return {
+        return {**interpretation,
             'candidates': retrieve_products(
                 query_context=query, selected_product_ids=selected,
                 filters=filters, limit=plan.result_limit),
@@ -225,13 +244,14 @@ def _retrieve(state: RecommendationState) -> dict:
         }
 
     # Rank a wider pool with the active filters. If no strong match survives,
-    # retry once without title color/type constraints for closest alternatives;
-    # category, brand, and condition remain hard in both searches.
+    # retry once without legacy title color/type filters. An extracted product
+    # phrase, category, brand and condition remain hard in both searches.
     pool = retrieve_products(
         query_context=query,
         selected_product_ids=selected,
         filters=filters,
         limit=max(plan.result_limit * 4, 20),
+        **search_options,
     )
     strong_matches = [
         product for product in pool
@@ -239,10 +259,11 @@ def _retrieve(state: RecommendationState) -> dict:
             product, query, has_visual_examples=bool(selected),
             required_title_color=filters.get('title_color'),
             required_product_type=filters.get('title_product'),
+            product_phrase=intent.product_phrase if intent else None,
         )
     ]
     if strong_matches:
-        return {
+        return {**interpretation,
             'candidates': strong_matches[:plan.result_limit], 'recommendations': [],
             'result_kind': 'matches',
         }
@@ -255,15 +276,17 @@ def _retrieve(state: RecommendationState) -> dict:
             selected_product_ids=selected,
             filters=relaxed_filters,
             limit=max(plan.result_limit * 4, 20),
+            **search_options,
         )
     alternatives = [
         product for product in fallback_pool
         if is_relevant_product(
             product, query, has_visual_examples=bool(selected),
             ignore_query_attributes=True,
+            product_phrase=intent.product_phrase if intent else None,
         )
     ][:plan.result_limit]
-    return {
+    return {**interpretation,
         'candidates': alternatives, 'recommendations': [],
         'result_kind': 'fallback' if alternatives else 'none',
     }
@@ -403,11 +426,27 @@ def _trace_node(
     return traced
 
 
-def sanitize_apparel_products(connection: psycopg.Connection, state: dict[str, Any]) -> dict[str, Any]:
-    """Hide stale non-apparel cards and IDs from a saved session snapshot.
+def sanitize_apparel_products(connection: psycopg.Connection, state: dict[str, Any],
+                             *, invalidate_changed: bool = True) -> dict[str, Any]:
+    """Refresh apparel facts and hide recommendations from changed source records.
 
     The session row and its conversation history remain intact. Only product
-    references that no longer belong to the active apparel catalog are omitted.
+    references outside apparel are omitted. Cart facts are refreshed. With
+    ``invalidate_changed=True`` (the default), changed/unknown source hashes
+    discard historical recommendations and scores. False stamps newly ranked
+    cards after the caller checks that the catalog revision has not changed.
+
+    Args:
+        connection: Open PostgreSQL connection used for one apparel-scoped read.
+        state: Saved or newly produced state; the input is not modified.
+        invalidate_changed: Whether changed or missing snapshot hashes invalidate
+            old recommendations. Defaults to True; False stamps new results.
+
+    Returns:
+        A new state mapping with current facts and eligible product references.
+
+    Raises:
+        psycopg.Error: If the current catalog cannot be read.
     """
     result = dict(state)
     referenced = {
@@ -420,23 +459,43 @@ def sanitize_apparel_products(connection: psycopg.Connection, state: dict[str, A
     if not referenced:
         result.update(recommendations=[], selected_product_ids=[], cart=[])
         return result
-    valid = {row[0] for row in connection.execute(
-        "SELECT id FROM products WHERE id = ANY(%s) AND "
+    current = {row[0]: dict(zip(
+        ('title', 'description', 'brand', 'category', 'image_meta', 'is_secondhand',
+         'features', 'source_record_sha256', 'image_sha256'), row[1:]))
+        for row in connection.execute(
+        "SELECT id,title,description,brand,raw_source->>'ground_truth_category',image,is_secondhand,"
+        "features,source_record_sha256,image_sha256 FROM products WHERE id = ANY(%s) AND "
         "(raw_source->>'ground_truth_category' = %s OR "
         "starts_with(raw_source->>'ground_truth_category', %s))",
         (list(referenced), APPAREL_CATEGORY, APPAREL_CATEGORY + ' > '),
     ).fetchall()}
-    result['recommendations'] = [
-        product for product in state.get('recommendations', [])
-        if isinstance(product, dict) and product.get('id') in valid
+    changed = set()
+    def refresh(product: dict[str, Any]) -> dict[str, Any]:
+        """Refresh source facts and discard scores tied to another snapshot."""
+        facts = current[product['id']]
+        stale = invalidate_changed and any(product.get(key) != facts.get(key)
+                    for key in ('source_record_sha256', 'image_sha256'))
+        updated = {**product, **facts}
+        if stale:
+            changed.add(product['id'])
+            for key in ('score', 'rrf_score', 'bm25_score', 'text_similarity',
+                        'image_similarity', 'example_similarity'):
+                updated[key] = None
+            updated['rrf_contributions'] = []
+        return updated
+
+    refreshed = [refresh(product) for product in state.get('recommendations', [])
+                 if isinstance(product, dict) and product.get('id') in current]
+    result['recommendations'] = [product for product in refreshed if product['id'] not in changed]
+    result['cart'] = [
+        refresh(product) for product in state.get('cart', [])
+        if isinstance(product, dict) and product.get('id') in current
     ]
     result['selected_product_ids'] = [
-        pid for pid in state.get('selected_product_ids', []) if pid in valid
+        pid for pid in state.get('selected_product_ids', []) if pid in current and pid not in changed
     ]
-    result['cart'] = [
-        product for product in state.get('cart', [])
-        if isinstance(product, dict) and product.get('id') in valid
-    ]
+    if changed:
+        result.update(status='catalog_changed', message='The catalog changed. Search again to refresh recommendations.')
     return result
 
 
@@ -451,7 +510,10 @@ def _is_plain_search(text: str) -> bool:
 
 
 def _can_pass_plain_search(text: str, previous_plan: Plan) -> bool:
-    """Avoid the LLM only when a plain search cannot conflict with saved edits."""
+    """Skip edit interpretation when a plain search cannot conflict with saved edits.
+
+    Textual retrieval still performs its own structured search-intent extraction.
+    """
     if not _is_plain_search(text):
         return False
     if (previous_plan.filters.brand or previous_plan.filters.is_secondhand is not None
@@ -475,10 +537,11 @@ def _can_pass_plain_search(text: str, previous_plan: Plan) -> bool:
 
 
 def run_recommendation_turn(agent: Any, *, thread_id: str, turn: dict[str, Any]) -> dict[str, Any]:
-    """Run one session turn under a PostgreSQL row lock and save its snapshot.
+    """Run a turn with a nonblocking session advisory lock and short transactions.
 
-    The session row is created if needed, locked while the graph runs, and
-    updated in the same database transaction. Persisted references are checked
+    The connection is idle outside transactions while inference runs. A second
+    turn for the same thread fails immediately; unrelated sessions can proceed.
+    A compare-and-save rejects external snapshot changes. Persisted references are checked
     against the apparel catalog before invocation. Transient request, candidate,
     category, uncertainty, and trace fields are omitted from the durable JSONB.
 
@@ -494,17 +557,40 @@ def run_recommendation_turn(agent: Any, *, thread_id: str, turn: dict[str, Any])
         ValueError: If ``thread_id`` is invalid or a graph-level check rejects
             the requested action.
         psycopg.Error: If PostgreSQL cannot create, lock, read, or save the session.
+        SessionBusyError: If another turn owns the session or its snapshot changed.
     """
     if not thread_id.strip() or len(thread_id) > 128:
         raise ValueError('Invalid session ID.')
-    with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
-        connection.execute("SET LOCAL lock_timeout = '5s'")
-        connection.execute('INSERT INTO agent_sessions(thread_id) VALUES (%s) ON CONFLICT DO NOTHING', (thread_id,))
-        previous = connection.execute('SELECT state FROM agent_sessions WHERE thread_id=%s FOR UPDATE', (thread_id,)).fetchone()[0]
-        previous = sanitize_apparel_products(connection, previous)
-        state = agent.invoke({**previous, 'turn': turn, 'trace': []},
-                             config={'configurable': {'thread_id': thread_id}})
-        durable = {k: v for k, v in state.items()
-                   if k not in {'turn', 'candidates', 'uncertain', 'categories', 'trace'}}
-        connection.execute('UPDATE agent_sessions SET state=%s,updated_at=now() WHERE thread_id=%s', (Jsonb(durable), thread_id))
+    with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5, autocommit=True) as connection:
+        lock_name = 'recommender-turn:' + thread_id
+        acquired = connection.execute('SELECT pg_try_advisory_lock(hashtextextended(%s,0))', (lock_name,)).fetchone()[0]
+        if not acquired:
+            raise SessionBusyError('This session is processing another request. Retry after it finishes.')
+        try:
+            with connection.transaction():
+                connection.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+                connection.execute("SET LOCAL lock_timeout = '5s'")
+                revision = connection.execute('SELECT revision FROM catalog_revision WHERE singleton=true').fetchone()[0]
+                connection.execute('INSERT INTO agent_sessions(thread_id) VALUES (%s) ON CONFLICT DO NOTHING', (thread_id,))
+                snapshot = connection.execute('SELECT state FROM agent_sessions WHERE thread_id=%s', (thread_id,)).fetchone()[0]
+                previous = sanitize_apparel_products(connection, snapshot)
+            state = agent.invoke({**previous, 'turn': turn, 'trace': []},
+                                 config={'configurable': {'thread_id': thread_id}})
+            # Stamp new cards with source identities before persisting them.
+            with connection.transaction():
+                connection.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+                connection.execute("SET LOCAL lock_timeout = '5s'")
+                current_revision = connection.execute('SELECT revision FROM catalog_revision WHERE singleton=true').fetchone()[0]
+                if current_revision != revision:
+                    raise SessionBusyError('The catalog changed during this request. Retry your search.')
+                state = sanitize_apparel_products(connection, state, invalidate_changed=False)
+                durable = {k: v for k, v in state.items()
+                           if k not in {'turn', 'candidates', 'uncertain', 'categories', 'trace'}}
+                saved = connection.execute(
+                    'UPDATE agent_sessions SET state=%s,updated_at=now() WHERE thread_id=%s AND state=%s',
+                    (Jsonb(durable), thread_id, Jsonb(snapshot)))
+                if saved.rowcount != 1:
+                    raise SessionBusyError('This session changed during the request. Reload and retry.')
+        finally:
+            connection.execute('SELECT pg_advisory_unlock(hashtextextended(%s,0))', (lock_name,))
     return state

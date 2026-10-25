@@ -1,4 +1,8 @@
-"""Fetch a reproducible, bounded sample of Shopify catalogue rows and images."""
+"""Fetch a reproducible, bounded sample of Shopify catalogue rows and images.
+
+Compatibility only: run ``uv run python scripts/data/fetch_sample.py --help``
+from the repository root to inspect source/split/output bounds. Downloads and
+file writes require an explicit fetch invocation; not the active catalog pipeline."""
 from __future__ import annotations
 
 import argparse

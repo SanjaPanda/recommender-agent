@@ -21,7 +21,11 @@ def _clip_encoder(model_name: str):
         raise RuntimeError("Install the optional image dependencies with `uv sync --extra image`.") from exc
     try:
         model = CLIPModel.from_pretrained(model_name, local_files_only=True).to("cpu").eval()
-        processor = CLIPProcessor.from_pretrained(model_name, local_files_only=True, use_fast=False)
+        revision = getattr(model.config, '_commit_hash', None)
+        if not revision:
+            raise RuntimeError('Cached CLIP model has no immutable revision; reinstall its snapshot.')
+        processor = CLIPProcessor.from_pretrained(model_name, revision=revision,
+                                                 local_files_only=True, use_fast=False)
     except OSError as exc:
         raise RuntimeError(
             f"CLIP model {model_name!r} is not cached locally; install it before using hybrid retrieval."
@@ -45,10 +49,24 @@ def text_embedding(query: str) -> list[float]:
     if not query.strip():
         raise ValueError("CLIP query must not be empty.")
     torch, model, processor = _clip_encoder(settings.image_embedding_model)
-    inputs = processor(text=[query.strip()], return_tensors="pt", padding=True)
+    inputs = processor(text=[query.strip()], return_tensors="pt", padding=True,
+                       truncation=True, max_length=model.config.text_config.max_position_embeddings)
     with torch.inference_mode():
         features = model.get_text_features(**inputs)[0].cpu().tolist()
     norm = math.sqrt(sum(float(value) * float(value) for value in features))
     if not math.isfinite(norm) or norm == 0 or not all(math.isfinite(float(v)) for v in features):
         raise ValueError("CLIP returned an invalid query vector.")
     return [float(value) / norm for value in features]
+
+
+def model_version() -> str:
+    """Return the revision of the cached CLIP encoder used by query inference.
+
+    Loads the configured local encoder if necessary; never downloads weights.
+    Raises RuntimeError when immutable revision metadata is unavailable.
+    """
+    _, model, _ = _clip_encoder(settings.image_embedding_model)
+    revision = getattr(model.config, '_commit_hash', None)
+    if not revision:
+        raise RuntimeError('Cached CLIP model has no immutable revision; reinstall its snapshot.')
+    return revision

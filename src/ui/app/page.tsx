@@ -15,6 +15,8 @@ type AgentResponse = {
   thread_id: string; a2ui_surface_id: string; products: Product[];
   selected_product_ids: string[]; status: string; message: string;
   query_context: string;
+  search_intent?: { product_phrase: string; search_terms: string[];
+    attributes: { name: string; value: string; evidence: string; excluded: boolean }[] } | null;
   categories: { name: string; count: number }[];
   cart: { id: string; title: string }[];
   preferences: { requirement: string; strength: string }[];
@@ -93,11 +95,17 @@ function RecommendationApp() {
       {session && session.status !== "categories" && <section className="search-applied" aria-label="Search applied">
         <strong>Search applied</strong>
         <p><span>Search:</span> {session.query_context || "Selected visual examples"}</p>
+        {session.search_intent && <details><summary>How your request was understood</summary>
+          <p><span>Product phrase:</span> {session.search_intent.product_phrase || "No specific product identified"}</p>
+          {session.search_intent.attributes.map((a, index) => <p key={index}><span>{a.name}:</span> {a.excluded ? "Exclude " : ""}{a.value} <small>(from “{a.evidence}”)</small></p>)}
+          {session.search_intent.search_terms.length > 0 && <p><span>Search terms:</span> {session.search_intent.search_terms.join(" · ")}</p>}
+          <p>These describe your request. Product checks below use listing evidence.</p>
+        </details>}
         <p><span>Catalog:</span> Apparel &amp; Accessories</p>
         {session.filters?.category_prefixes?.map(c => <p key={c}><span>Category:</span> {c}</p>)}
         {session.filters?.brand && <p><span>Brand:</span> {session.filters.brand}</p>}
         {session.filters?.is_secondhand != null && <p><span>Condition:</span> {session.filters.is_secondhand ? "Secondhand" : "Brand new"}</p>}
-        {session.filters?.title_product && <p><span>Product:</span> {session.filters.title_product}</p>}
+        {!session.search_intent && session.filters?.title_product && <p><span>Product:</span> {session.filters.title_product}</p>}
         {session.filters?.title_color && <p><span>Title color:</span> {session.filters.title_color}</p>}
         {session.preferences?.map(p => <p key={p.requirement}><span>Preference:</span> {p.requirement} ({p.strength})</p>)}
         {session.selected_product_ids.length > 0 && <p><span>Visual examples:</span> {session.selected_product_ids.length} selected</p>}

@@ -58,7 +58,7 @@ def complete(
         'model': model, 'think': settings.agent_think, 'stream': False, 'format': schema.model_json_schema(),
         'messages': [{'role': 'system', 'content': system}, message],
         'options': {'temperature': 0, 'num_predict': {'Plan': 640, 'Summary': 256}.get(schema.__name__, 640),
-                    'num_ctx': 4096}, 'keep_alive': '1m',
+                    'num_ctx': 4096}, 'keep_alive': 0 if schema.__name__ == 'SearchIntent' else '1m',
     }
     # Some small GPUs make partial offload slower than CPU-only inference.
     if settings.agent_num_gpu is not None:

@@ -1,7 +1,8 @@
-"""Apply ordered SQL migrations to the configured PostgreSQL database."""
-from __future__ import annotations
+"""Apply ordered SQL migrations to the configured PostgreSQL database.
 
-import re
+Run ``uv run python scripts/db/apply_migrations.py`` from the repository root.
+Requires configured PostgreSQL; writes schema/migration records. See docs/SETUP.md."""
+from __future__ import annotations
 
 import psycopg
 
@@ -27,10 +28,10 @@ def main() -> None:
                 continue
 
             sql = migration_path.read_text(encoding="utf-8")
-            statements = [part.strip() for part in re.split(r";\s*", sql) if part.strip()]
             with connection.transaction():
-                for statement in statements:
-                    connection.execute(statement)
+                # Let PostgreSQL parse statements, including dollar-quoted
+                # function bodies containing their own semicolons.
+                connection.execute(sql, prepare=False)
                 connection.execute(
                     "INSERT INTO schema_migrations (version) VALUES (%s)", (version,)
                 )

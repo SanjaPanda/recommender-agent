@@ -1,104 +1,55 @@
-# Database notes
+# Database contract
 
-## Schema and baseline inspection
+PostgreSQL 17 and pgvector run in Compose service `db`, bound to loopback with a persistent named volume. FastAPI connects using the secret-wrapped `DATABASE_URL`; Compose uses `POSTGRES_*`. API and Ollama run on the host; Next.js runs in Compose.
 
-The connected database inspected on 2026-10-21 is `recommender_agent` (local Compose PostgreSQL 17 with pgvector). It is the project-local named volume `recommender_pgdata`; no shared schema or unrelated database was inspected or changed.
+## Setup and inspection
 
-| Table | Rows before cleanup | Purpose |
-|---|---:|---|
-| `products` | 8,671 | Catalog facts, images, captions, and optional attributes |
-| `product_embeddings` | 17,863 | Text, CLIP image, and caption vectors; product FK cascades on deletion |
-| `agent_sessions` | 2 | Durable LangGraph turn snapshots and cart state |
-| `product_feedback` | 0 | Reserved feedback table; no records |
-| `recommendation_sessions` | 0 | Older empty session table |
-| `schema_migrations` | 5 | Applied migration versions |
+From the repository root, with `.env` configured:
 
-There are no duplicate product IDs or orphan embeddings. All 8,671 product rows have image metadata. The 2,173 apparel rows all have text and CLIP embeddings. Caption vectors cover 124 apparel products. One apparel row has structured attributes.
+```powershell
+docker compose up -d db
+uv run python scripts/db/apply_migrations.py
+uv run python scripts/db/inspect_database.py
+```
 
-| Catalog group | Products | Text vectors | CLIP vectors | Caption vectors |
-|---|---:|---:|---:|---:|
-| Apparel & Accessories | 2,173 | 2,173 | 2,173 | 124 |
-| Other categories | 6,498 | 6,498 | 6,498 | 397 |
+Migration filenames are recorded in `schema_migrations`. Apply pending migrations before starting the API; never rewrite applied migrations. Inspection is read-only and reports versions, migration names and counts without printing credentials. Migration 012 is required for catalog revision tracking. No new migration is required for the audit fixes.
 
-The 6,498 other-category records include Health & Beauty, Animals & Pet Supplies, Baby & Toddler, Sporting Goods, Home & Garden, and smaller categories. There are 398 non-empty captions among these products, 397 with vectors. Four apparel products have non-empty captions without vectors. No duplicate-title candidates are treated as duplicate products because the source has no stable identifier beyond the content-derived ID.
+## Tables and provenance
 
-The local database size at inspection was 110,196,403 bytes. After cleanup and re-ingestion it was 110,270,131 bytes. The post-cleanup physical compaction details are recorded below.
+- `dataset_sources`: pinned source revision, source URL, recorded use decision and frozen normalization/quality configuration. Operational scan budgets may increase without changing source identity.
+- `products`: stable source identity, normalized apparel taxonomy, raw source JSON, title, description, feature bullets, local image metadata, nullable historical price, source-record/image hashes and the versioned attributes document.
+- `product_embeddings`: separate text/image vectors, model name, immutable model version, generated dimensions and ready/error status. Product deletion cascades to embeddings. One vector per product/modality/model name is retained; rebuilding overwrites that model's prior revision in batches.
+- `agent_sessions`: durable graph snapshots and carts keyed by thread ID. Trace/candidate/request fields are transient.
+- `catalog_revision`: singleton counter maintained transactionally by a statement trigger on product INSERT/UPDATE/DELETE/TRUNCATE.
+- `product_feedback` and `recommendation_sessions`: retained legacy tables, outside the active request flow.
 
-## Cleanup executed
+The active importer is `rag.catalog`, with bounded acquisition in `rag.download_catalog` and orchestration in `scripts/expand_catalog.py`. The Shopify utilities are compatibility interfaces, not the active pipeline. Source-linked products require source identity, a positive original line number and record hash; the database rejects taxonomy outside Apparel & Accessories. Importer checks also validate source descriptions, image inventory, safe local paths, decoded images and source-use records. Absent records are not deleted during import; changed source/image hashes invalidate their vectors.
 
-The user approved backup-first cleanup of all product data outside Apparel & Accessories. Exact pre-delete scope:
+## Retrieval and model compatibility
 
-- Keep the 2,173 products whose `raw_source.ground_truth_category` is exactly `Apparel & Accessories` or a descendant path.
-- Delete the remaining 6,498 product rows. `ON DELETE CASCADE` removes 13,393 embeddings: 6,498 text, 6,498 CLIP image, and 397 caption vectors.
-- Product deletion also removes non-apparel product JSON/image metadata, the 398 non-empty captions, and two non-apparel structured-attribute records.
-- Retain the one apparel attribute document, all tables and columns, indexes, extension, all five applied migrations, the database volume, and both `agent_sessions` rows. No feedback records or recommendation session records exist.
-- One existing session contains 14 product-ID tokens, including nine IDs still in the database; none are apparel. The app now filters stale/non-apparel cards, selected IDs, and cart entries while preserving the stored row and conversation history.
+Every retrieval path independently constrains the authoritative apparel root. Exact vector SQL also requires the query encoder's immutable model revision and vector dimensions. Nomic tag resolution selects the exact installed tag (`:latest` when omitted), checking for an alias change across query encoding. CLIP query retrieval uses the loaded cached encoder revision. Image-only examples must share one nonempty revision and dimension; candidates must match that revision. Mixed or stale revisions are excluded, so interrupted rebuilds can reduce vector coverage until resumed. BM25 remains independently available inside the same eligibility rules; text-query embedding service failure still fails the request.
 
-The user approved cleanup and removal of the obsolete garden/mixed-category artifacts. Before SQL ran, a 61 MiB custom-format backup was written to `.codex-work/backups/recommender_agent_pre_apparel.dump`, copied back into the ignored workspace, and validated with `pg_restore --list`. The backup includes all six tables, indexes, constraints, and the pgvector extension.
+Importers and embedding CLIs share an advisory maintenance lock. Expansion also holds it through publication and keeps `.data/catalog/.promotion.json` until the metadata and ingestion report are published. Database commit and filesystem replacement are not atomic; rerunning expansion verifies the staged metadata hashes, idempotently imports it and completes pending file replacement. Keep the stage and catalog backups until recovery is complete. See [setup](SETUP.md#catalog-expansion-and-recovery).
 
-Migration [`006_apparel_catalog_scope.sql`](../migrations/006_apparel_catalog_scope.sql) ran and is recorded in `schema_migrations`. It deleted 6,498 non-apparel products; the product foreign key cascaded deletion of 13,393 embeddings. The database volume and schema were retained. Immediately after catalog cleanup and a repeated ingestion (before migration 007), verification reported:
+## Sessions and caches
 
-| Table | Rows after cleanup |
-|---|---:|
-| `products` | 2,173 |
-| `product_embeddings` | 4,470 |
-| `agent_sessions` | 3 |
-| `product_feedback` | 0 |
-| `recommendation_sessions` | 0 |
-| `schema_migrations` | 6 |
+Session turns take a nonblocking, connection-scoped advisory lock for their thread. Short repeatable-read transactions load and save snapshots; model inference runs outside a transaction. A competing turn receives HTTP 409. Compare-and-save prevents overwriting an externally changed session, and a catalog revision change during inference rejects the stale turn. Closing the connection releases its advisory lock even on failure.
 
-The only product root is Apparel & Accessories. Embedding counts are 2,173 text, 2,173 CLIP image, and 124 image-description vectors. All 2,173 IDs match the filtered train/test files, all IDs are unique, every product has text and CLIP vectors, there are no orphan embeddings, and all 2,173 local source images exist. One apparel attribute record remains in the legacy JSONB `attributes` column. The experimental extraction/import code was removed, but the column and migrations 004/005 remain to preserve that record; dropping them would require a separate reviewed migration. Re-running `scripts/db/ingest_sample.py` twice upserted 2,173 rows each time without changing counts.
+Cards store source-record/image hashes. Session resume refreshes current facts, removes invalid/changed recommendations and visual selections, and refreshes cart entries while clearing obsolete ranking scores. Older snapshots without matching provenance are invalidated. API serialization refreshes current apparel listing facts and image references independently. Historical rankings are not asserted against a changed listing.
 
-The 2 pre-existing session rows remain. Runtime session loading filters stale non-apparel IDs from cards, selected examples, and carts while preserving each row and its conversation history. The live UI verification created 1 additional session containing only apparel references; that session remains open in the shared browser.
+Category counts use an eight-entry process cache keyed by database identity and committed revision. Revision/count reads share one read-only repeatable-read snapshot. BM25 caches immutable document tokens and statistics for the exact eligible document sequence. Restart API workers after database restore to discard process-local caches.
 
-## Source cache cleanup
+## Verification and operational limits
 
-The ignored `.data` cache was filtered to the two active splits. Train went from 5,908 mixed rows to 1,705 apparel rows, retaining 537,759,395 bytes of referenced images and removing 769,794,454 bytes of non-apparel images. Test went from 1,575 rows to 468 apparel rows, retaining 159,383,367 bytes and removing 187,089,485 bytes. The source IDs still match the database exactly and all retained image paths resolve.
+```powershell
+.venv/Scripts/python.exe -m unittest discover -s tests -v
+$env:RUN_DATABASE_TESTS='1'
+.venv/Scripts/python.exe -m unittest discover -s tests -v
+Remove-Item Env:RUN_DATABASE_TESTS
+```
 
-The obsolete `.data/shopify-catalogue-sample` and three `shopify-outdoor-garden*` directories, cross-category attribute pilot outputs, and generated category/model logs were removed at the user's request. This cleanup freed 1,478,531,159 bytes total, including those image removals and directories. Apparel caption and router evaluation artifacts remain.
+The default suite skips opt-in PostgreSQL integration tests. Most use rollback fixtures; cross-connection cache/session tests commit temporary authored rows and clean them up. They can advance the catalog revision, so run against a development database, not a read-only audit target. No test downloads a catalog or rebuilds production embeddings.
 
-The ignored backup is the rollback path if restoration is needed.
+The schema does not enforce a model/dimension registry. Runtime revision/dimension predicates protect retrieval, but administrative writers must still supply valid finite vectors. Optional input/preprocessing hash columns are not populated by the existing encoder CLIs. Historical price is not an API price filter; candidate attributes are unreviewed and do not enable hard filters. No ANN index or judged relevance benchmark is claimed.
 
-## Database objects retained
-
-Existing indexes are product primary key, product brand/category, embedding compound primary key, agent session primary key, feedback primary key/session-time, and recommendation session primary key. At 2,173 products, exact pgvector ranking is retained without approximate indexes. Empty feedback/session tables and schema history remain because dropping schema objects was not part of the approved data cleanup.
-
-## Post-cleanup physical compaction
-
-On 2026-10-21, after the approved catalog cleanup, ran `VACUUM (FULL, ANALYZE)` on `products` and `product_embeddings`. Before compaction, PostgreSQL reported a 105 MB database, with table totals of 31 MB and 66 MB. After compaction, it reported a 30 MB database, with table totals of 5,968 kB and 16 MB. Counts remained 2,173 products and 4,470 embeddings; `n_dead_tup` was zero for both tables, there were zero orphan embeddings, and the only product root remained Apparel & Accessories. `VACUUM FULL` briefly locks the target table while rewriting it. These sizes are PostgreSQL-reported, rounded display values; no application performance improvement was measured.
-
-## Retiring image descriptions
-
-The active recommender no longer generates, stores, or retrieves image descriptions. Migration `009_remove_image_descriptions.sql` ran on 2026-10-21 after a fresh backup and live schema/count inspection.
-
-Before migration, the project database had 2,173 products, 4,470 embeddings (2,173 text, 2,173 CLIP image, 124 image-description), three agent sessions, zero feedback rows, zero legacy recommendation sessions, and seven migration records. All product roots were Apparel & Accessories; there were zero orphan embeddings. Products had 124 non-empty `image_description` values, 128 non-null provenance values, and zero populated structured visual fields. The one existing product-attributes record was retained.
-
-The verified custom-format backup is `.codex-work/backups/recommender_agent_pre_image_description_removal_20261021.dump` (15,480,979 bytes; SHA-256 `1421fdcbfba6a6f1c3212411e9351d299383fa60576c31197584648dfede7399`; `pg_restore --list` succeeded). This backup is the rollback path.
-
-Migration 009 deleted the 124 caption vectors, constrained embedding modalities to `text` and `image`, and dropped eight retired product columns: `image_description`, `image_description_meta`, `image_product_type`, `image_colours`, `image_pattern`, `image_components`, `image_object_count`, and `image_other_details`. It preserved products and source images, text and CLIP vectors, attributes, sessions, and all other tables/indexes.
-
-After migration, PostgreSQL reports:
-
-| Table or validation | Rows/result |
-|---|---:|
-| `products` | 2,173 |
-| `product_embeddings` | 4,346 (2,173 text + 2,173 image) |
-| `agent_sessions` | 3 |
-| `product_feedback` | 0 |
-| `recommendation_sessions` | 0 |
-| `schema_migrations` | 8 |
-| Orphan embeddings | 0 |
-| Products missing text vectors | 0 |
-| Products missing CLIP image vectors | 0 |
-| Non-apparel product roots | 0 |
-| Retired image-description columns remaining | 0 |
-| Populated product attributes | 1 (retained) |
-
-The live `blue cotton dress` retrieval smoke query returned five products with both text and CLIP scores after migration. The offline suite passed 51 tests. Averages and recommendation-quality improvement were not measured. Migration 008 was never applied; its `image_components` removal is included in migration 009.
-
-
-After migration, the idempotent ingestion rerun upserted 2,173 records and left products at 2,173 and embeddings at 4,346 (2,173 each text and image). A post-migration browser smoke check added one agent session; the current gent_sessions count is 4. Product, embedding, apparel-root, and retired-column checks remained unchanged. The UI displayed five products for the Clothing category, narrowed to five title-matched black products, and accepted a selected visual example.
-
-
-The ingestion/UI validation created a fourth gent_sessions row; current counts are 2,173 products and 4,346 embeddings. VACUUM (ANALYZE) product_embeddings cleared the 124 dead caption-vector tuple versions (
-_dead_tup=0). PostgreSQL-reported database size was 37,205,683 bytes immediately before vacuum and 36,746,931 bytes after; the embeddings relation changed from 16,916,480 to 16,441,344 bytes. These are observed storage counters, not a benchmark or application performance result.
+The last read-only audit observed 2,000 products, 4,000 embedding rows and 11 applied migrations on 2026-10-24. These are observations, not fresh-install guarantees. Earlier reset/pilot milestones and backup references are preserved in [the historical database record](../observations/archive/2026-10-24-before-audit-fixes/database.md); do not follow historical next steps as current setup.

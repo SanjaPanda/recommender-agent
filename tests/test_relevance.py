@@ -1,5 +1,6 @@
 """Evidence checks for relevance gates and fallback alternative ranking."""
 import unittest
+from agent.models import SearchIntent
 from unittest.mock import patch
 
 from agent.models import Filters, Plan
@@ -9,6 +10,12 @@ from agent.workflow import _retrieve
 
 class RelevanceTests(unittest.TestCase):
     """Keep explicit attributes and product terms from being lost in vectors."""
+
+    def setUp(self):
+        # Routing/relevance tests isolate the separately tested LLM extractor.
+        intent_patch = patch('agent.workflow.extract_search_intent', return_value=SearchIntent())
+        intent_patch.start()
+        self.addCleanup(intent_patch.stop)
 
     def test_color_and_product_terms_reject_wrong_color_or_wrong_type(self):
         yellow_tie = {

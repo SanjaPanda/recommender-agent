@@ -1,5 +1,6 @@
 """Regression checks for atomic edits and unchanged shopping context."""
 import unittest
+from agent.models import SearchIntent
 from unittest.mock import patch
 
 from agent.edits import AmbiguousEdit, apply_edits
@@ -9,6 +10,10 @@ from agent.workflow import build_recommendation_agent
 
 class EditTests(unittest.TestCase):
     def setUp(self):
+        # Routing/relevance tests isolate the separately tested LLM extractor.
+        intent_patch = patch('agent.workflow.extract_search_intent', return_value=SearchIntent())
+        intent_patch.start()
+        self.addCleanup(intent_patch.stop)
         self.old = Plan(intent='recommend', query='dress', filters=Filters(brand='vidaXL'),
                         preferences=[{'requirement': 'not blue'},
                                      {'requirement': 'lightweight', 'strength': 'soft'}])
