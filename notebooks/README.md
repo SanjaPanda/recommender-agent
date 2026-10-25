@@ -1,6 +1,6 @@
 # Retrieval experiments
 
-Two small, executed Python notebooks compare the existing apparel retrieval signals.
+Two small Python notebooks with retained historical experiment results compare the existing apparel retrieval signals.
 They read the catalog and stored vectors, call local embedding encoders, and save
 private experiment caches and observations. They never update products, application
 vectors, sessions, ranking weights or thresholds. No generative LLM is used.
@@ -9,6 +9,10 @@ vectors, sessions, ranking weights or thresholds. No generative LLM is used.
 | --- | --- |
 | [01_text_queries.ipynb](01_text_queries.ipynb) | When do BM25, Nomic text, CLIP text-to-image and the existing RRF reference differ? |
 | [02_image_examples.ipynb](02_image_examples.ipynb) | What changes with 1/2/3 images, conflicting examples, descriptions and short visual captions? |
+
+The runtime imports were updated during the 2026-10-25 simplification. Changed
+code-cell outputs were cleared and notebook execution metadata marks this revision
+as not rerun. Historical findings below describe the earlier executed revision.
 
 ## Reproduce
 

@@ -1,10 +1,17 @@
-"""Apparel-only PostgreSQL retrieval and hybrid ranking."""
+"""Runtime apparel retrieval, shared eligibility, BM25/vector ranking and RRF.
+
+Use ``uv run recommender-search "blue cotton dress"`` from the repository root
+for raw ranking diagnostics. Agent turns add interpretation and relevance policy
+in agent.workflow. QueryVectors is request-local; database facts remain fresh.
+Checks: ``.venv/Scripts/python.exe -m unittest discover -s tests -v``.
+"""
 from __future__ import annotations
 
 import logging
 import re
 import hashlib
 from collections import OrderedDict
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
@@ -13,18 +20,77 @@ from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from agent.config import settings
-from . import APPAREL_CATEGORY, validate_category_prefixes
+from rag import APPAREL_CATEGORY, validate_category_prefixes
 from .clip_runtime import text_embedding as clip_text_embedding
 from .clip_runtime import model_version as clip_model_version
-from .embed_text import MODEL as TEXT_MODEL, embed_texts, model_digest as text_model_version
+from .embeddings import MODEL as TEXT_MODEL, embed_texts, model_digest as text_model_version
 from .bm25 import rank as bm25_rank
-from .product_types import product_type, requested_product_type, sql_pattern
-from .phrases import phrase_in_title, phrase_pattern
+from rag.product_types import product_type, requested_product_type, sql_pattern
+from rag.phrases import phrase_in_title, phrase_pattern
 
 IMAGE_MODEL = settings.image_embedding_model
 logger = logging.getLogger(__name__)
 _category_cache = OrderedDict()
 _category_cache_lock = Lock()
+
+
+@dataclass(frozen=True)
+class QueryVectors:
+    """Encoded request and immutable encoder identities for one shopping turn.
+
+    Fields retain the exact input query, optional Nomic/CLIP vectors and their
+    revisions. This value is transient and must not enter session JSON.
+
+    Attributes:
+        query: Exact effective request used to generate both vectors.
+        text: Nomic query vector, absent for blank browsing/image-only requests.
+        image: CLIP text vector, absent for blank queries or unavailable CLIP.
+        text_version: Installed Nomic digest verified across query encoding.
+        image_version: Immutable cached CLIP snapshot revision when available.
+    """
+    query: str
+    text: list[float] | None
+    image: list[float] | None
+    text_version: str | None
+    image_version: str | None
+
+
+def prepare_query(query: str) -> QueryVectors:
+    """Encode a request once for primary and relaxed-filter searches.
+
+    Args:
+        query: Effective product need plus preferences; blank means no encoding.
+
+    Returns:
+        Request-local vectors with revision identities. Missing CLIP leaves the
+        text/keyword modes usable. This does not cache across users or turns.
+
+    Raises:
+        ValueError: If the query requires unsupported product conditions.
+        RuntimeError: If Nomic is unavailable or changes revision mid-encoding.
+    """
+    from agent.conditions import requests_condition, UNSUPPORTED_CONDITION
+    if requests_condition(query):
+        raise ValueError(UNSUPPORTED_CONDITION)
+    query_vector = None
+    clip_vector = None
+    text_version = image_version = None
+    if query.strip():
+        try:
+            text_version = text_model_version()
+            query_vector = embed_texts("search_query: " + query.strip())[0]
+            if text_model_version() != text_version:
+                raise RuntimeError('Text encoder changed during inference. Retry after pinning the installed tag.')
+        except SystemExit as exc:
+            raise RuntimeError(str(exc)) from exc
+        try:
+            clip_vector = clip_text_embedding(query)
+            image_version = clip_model_version()
+        except (RuntimeError, ValueError) as exc:
+            clip_vector = None
+            logger.warning("CLIP text retrieval unavailable; using Nomic text ranking: %s", exc)
+
+    return QueryVectors(query, query_vector, clip_vector, text_version, image_version)
 
 
 def retrieve_products(
@@ -37,6 +103,7 @@ def retrieve_products(
     product_phrase: str | None = None,
     search_terms: list[str] | None = None,
     excluded_product_ids: list[str] | None = None,
+    prepared_query: QueryVectors | None = None,
 ) -> list[dict[str, Any]]:
     """Rank apparel by product text, CLIP images, and selected examples.
 
@@ -54,6 +121,8 @@ def retrieve_products(
         product_phrase: LLM-extracted literal product phrase; empty disables title-family inference.
         search_terms: LLM-proposed equivalent phrases used for lexical ranking only.
         excluded_product_ids: Session cart IDs omitted from every mode before limits.
+        prepared_query: Vectors for this exact query, reused by the fallback pass;
+            omitted by CLI callers to encode within this function.
 
     Returns:
         Products in fused ranking order with stable database IDs and per-mode scores.
@@ -91,23 +160,11 @@ def retrieve_products(
         category_params.append(r"\m" + phrase_pattern(product_phrase) + r"\M(?=$|\s*[^[:alpha:][:space:]])")
     candidate_limit = max(limit * 10, 50)
 
-    query_vector = None
-    clip_vector = None
-    text_version = image_version = None
-    if query_context.strip():
-        try:
-            text_version = text_model_version()
-            query_vector = embed_texts("search_query: " + query_context.strip())[0]
-            if text_model_version() != text_version:
-                raise RuntimeError('Text encoder changed during inference. Retry after pinning the installed tag.')
-        except SystemExit as exc:
-            raise RuntimeError(str(exc)) from exc
-        try:
-            clip_vector = clip_text_embedding(query_context)
-            image_version = clip_model_version()
-        except (RuntimeError, ValueError) as exc:
-            clip_vector = None
-            logger.warning("CLIP text retrieval unavailable; using Nomic text ranking: %s", exc)
+    vectors = prepared_query if prepared_query is not None else prepare_query(query_context)
+    if vectors.query != query_context:
+        raise ValueError('Prepared vectors belong to a different query.')
+    query_vector, clip_vector = vectors.text, vectors.image
+    text_version, image_version = vectors.text_version, vectors.image_version
 
     bm25_rows: list[tuple[Any, ...]] = []
     text_rows: list[tuple[Any, ...]] = []
@@ -339,7 +396,19 @@ def _search_embedding(
 
 
 def filter_clause(filters: dict[str, Any], category_prefixes: list[str]) -> tuple[str, list[Any]]:
-    """Compile validated apparel filters to parameterized SQL predicates."""
+    """Compile supported apparel filters to parameterized SQL predicates.
+
+    Args:
+        filters: Category paths, exact brand and optional single-word title gates.
+        category_prefixes: Legacy direct-call category paths when filters omit them.
+
+    Returns:
+        SQL suffix and ordered values. The authoritative apparel root is always
+        enforced independently of narrower requested category paths.
+
+    Raises:
+        ValueError: For unsupported filters, out-of-scope paths or invalid title gates.
+    """
     allowed = {"brand", "category_prefixes", "title_color", "title_product"}
     if set(filters) - allowed:
         raise ValueError("Unsupported catalogue filter")

@@ -8,143 +8,15 @@ from __future__ import annotations
 
 import argparse
 import time
-import urllib.error
-import urllib.request
-import json
-from typing import Annotated, Any
+from typing import Any
 
 import psycopg
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, field_validator
 from pgvector.psycopg import register_vector
 from pgvector import Vector
 
-from agent.config import ROOT, settings
+from agent.config import settings
+from agent.tools.embeddings import MODEL, document_text, embed_texts, model_digest
 from . import CATALOG_WRITE_LOCK
-
-OLLAMA_URL = settings.ollama_url
-MODEL = settings.embedding_model
-
-
-def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Send one JSON request to the configured local Ollama endpoint."""
-    request = urllib.request.Request(
-        f"{OLLAMA_URL.rstrip('/')}{path}",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            return json.load(response)
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Could not reach Ollama at {OLLAMA_URL}: {exc}") from exc
-
-
-class EmbeddingOptions(BaseModel):
-    """Optional local hardware override; provider defaults otherwise apply."""
-    model_config = ConfigDict(extra="forbid")
-    num_gpu: int = Field(ge=0)
-
-
-class EmbeddingRequest(BaseModel):
-    """Typed Ollama text-embedding request."""
-
-    model_config = ConfigDict(extra="forbid")
-    model: str = Field(min_length=1)
-    input: str | list[str] = Field(description="One query/document or a batch of texts.")
-    options: EmbeddingOptions | None = None
-
-
-class EmbeddingResponse(BaseModel):
-    """Validated finite vectors returned by Ollama's embedding endpoint."""
-
-    model_config = ConfigDict(extra="forbid")
-    model: str = Field(min_length=1)
-    embeddings: list[Annotated[list[FiniteFloat], Field(min_length=1)]] = Field(min_length=1)
-    total_duration: int | None = Field(default=None, ge=0)
-    load_duration: int | None = Field(default=None, ge=0)
-    prompt_eval_count: int | None = Field(default=None, ge=0)
-    prompt_eval_duration: int | None = Field(default=None, ge=0)
-    eval_count: int | None = Field(default=None, ge=0)
-    eval_duration: int | None = Field(default=None, ge=0)
-
-    @field_validator("embeddings")
-    @classmethod
-    def finite_nonzero_consistent_vectors(
-        cls, vectors: list[list[float]]
-    ) -> list[list[float]]:
-        """Require equal-sized nonzero vectors before retrieval or storage."""
-        dimensions = {len(vector) for vector in vectors}
-        if len(dimensions) != 1 or any(not any(value != 0 for value in vector) for vector in vectors):
-            raise ValueError("Embedding vectors must share one dimension and be nonzero.")
-        return vectors
-
-
-def embed_texts(inputs: str | list[str]) -> list[list[float]]:
-    """Embed one or more strings with the configured local Nomic model.
-
-    Args:
-        inputs: Non-empty search query or batch of product texts.
-
-    Returns:
-        Finite embedding vectors in input order.
-
-    Raises:
-        ValueError: If no text is provided.
-        RuntimeError: If Ollama returns a malformed response or wrong vector count.
-    """
-    values = [inputs] if isinstance(inputs, str) else inputs
-    if not values or any(not value.strip() for value in values):
-        raise ValueError("Embedding input must contain non-empty text.")
-    request = EmbeddingRequest(model=MODEL, input=inputs, options=(
-        EmbeddingOptions(num_gpu=settings.embedding_num_gpu) if settings.embedding_num_gpu is not None else None))
-    try:
-        response = EmbeddingResponse.model_validate(
-            post_json("/api/embed", request.model_dump(exclude_none=True))
-        )
-    except ValidationError as exc:
-        locations = ", ".join(
-            ".".join(str(part) for part in error["loc"])
-            for error in exc.errors(include_input=False)
-        )
-        raise RuntimeError(f"Ollama embedding response failed validation at: {locations}.") from exc
-    if len(response.embeddings) != len(values):
-        raise RuntimeError(
-            f"Ollama returned {len(response.embeddings)} vectors for {len(values)} inputs."
-        )
-    return response.embeddings
-
-
-def model_digest() -> str:
-    """Resolve the exact installed Ollama tag to its immutable digest.
-
-    Untagged names select ``:latest``. Explicit tags and registry host ports
-    are preserved. Raises RuntimeError for invalid metadata and SystemExit if
-    the configured tag is absent. Performs one local metadata request.
-    """
-    request = urllib.request.Request(f"{OLLAMA_URL.rstrip('/')}/api/tags")
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            tags = json.load(response)
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Could not read Ollama model metadata: {exc}") from exc
-    name = MODEL if ':' in MODEL.rsplit('/', 1)[-1] else MODEL + ':latest'
-    for model in tags.get("models", []):
-        installed = model.get('name', '')
-        installed = installed if ':' in installed.rsplit('/', 1)[-1] else installed + ':latest'
-        if installed == name:
-            digest = model.get('digest')
-            if not isinstance(digest, str) or not digest:
-                raise RuntimeError('Installed embedding model has no revision digest.')
-            return digest
-    raise SystemExit(f"Model {MODEL!r} is not installed. Run: ollama pull {MODEL}")
-
-
-def document_text(title: str | None, description: str | None, features: list[str] | None = None) -> str:
-    """Format title, source description and bullet features for Nomic retrieval."""
-    parts = [part.strip() for part in (title, description) if part and part.strip()]
-    parts.extend(feature.strip() for feature in (features or []) if isinstance(feature, str) and feature.strip())
-    return "search_document: " + "\n".join(parts)
-
 
 def main() -> None:
     """Embed catalogue product text and upsert model-versioned vectors."""

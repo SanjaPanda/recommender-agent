@@ -15,9 +15,9 @@ class Contract(BaseModel):
 
 
 class AgentTraceEvent(BaseModel):
-    """Safe summary of one completed LangGraph node, without prompt contents."""
+    """Safe summary of one completed execution stage, without prompt contents."""
 
-    node: Literal["router", "retrieve", "respond"] = Field(description="LangGraph node that completed.")
+    node: Literal["router", "retrieve", "respond"] = Field(description="Execution stage that completed.")
     duration_ms: int = Field(ge=0, description="Node wall time in milliseconds.")
     route: str | None = Field(default=None, description="Router branch selected, when applicable.")
     status: str | None = Field(default=None, description="Validated shopping workflow status, when available.")

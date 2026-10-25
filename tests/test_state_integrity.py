@@ -15,9 +15,9 @@ from agent.relevance import is_relevant_product
 from agent.search_intent import extract_search_intent
 from agent.product_evidence import listing_checks
 from agent.llm import ModelError
-from agent.workflow import SessionBusyError, run_recommendation_turn, sanitize_apparel_products
-from rag import embed_text
-from rag.retrieval import _search_embedding, retrieve_products
+from agent.sessions import SessionBusyError, run_recommendation_turn, sanitize_apparel_products
+from agent.tools import embeddings as embed_text
+from agent.tools.retrieval import _search_embedding, retrieve_products
 from scripts import expand_catalog
 import psycopg
 from psycopg.types.json import Jsonb
@@ -29,7 +29,7 @@ class StateIntegrityTests(unittest.TestCase):
         from agent.workflow import _retrieve
         plan = Plan(intent='recommend', query='black dress')
         with patch('agent.workflow.extract_search_intent', return_value=SearchIntent(product_phrase='dress')) as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[{'id': 'd', 'title': 'Black Dress'}]):
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[{'id': 'd', 'title': 'Black Dress'}]):
             result = _retrieve({'plan': plan.model_dump(), 'intent_query': 'blue dress',
                                 'search_intent': SearchIntent(product_phrase='dress').model_dump()})
         extract.assert_called_once_with('black dress')
@@ -71,9 +71,9 @@ class StateIntegrityTests(unittest.TestCase):
         self.assertEqual(values[3:6], ('pinned', 2, 'Apparel & Accessories'))
 
     def test_changed_encoder_during_query_fails_before_database_search(self):
-        with patch('rag.retrieval.text_model_version', side_effect=['old', 'new']), \
-             patch('rag.retrieval.embed_texts', return_value=[[1., 0.]]), \
-             patch('rag.retrieval.psycopg.connect') as connect:
+        with patch('agent.tools.retrieval.text_model_version', side_effect=['old', 'new']), \
+             patch('agent.tools.retrieval.embed_texts', return_value=[[1., 0.]]), \
+             patch('agent.tools.retrieval.psycopg.connect') as connect:
             with self.assertRaisesRegex(RuntimeError, 'changed during inference'):
                 retrieve_products(query_context='dress')
         connect.assert_not_called()
@@ -82,7 +82,7 @@ class StateIntegrityTests(unittest.TestCase):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
             ('a', [1., 0.], 'Dress', 'old'), ('b', [1., 0.], 'Dress', 'new')]
-        with patch('rag.retrieval.psycopg.connect') as connect, patch('rag.retrieval.register_vector'):
+        with patch('agent.tools.retrieval.psycopg.connect') as connect, patch('agent.tools.retrieval.register_vector'):
             connect.return_value.__enter__.return_value = connection
             with self.assertRaisesRegex(ValueError, 'incompatible CLIP revisions'):
                 retrieve_products(selected_product_ids=['a', 'b'])
@@ -90,8 +90,8 @@ class StateIntegrityTests(unittest.TestCase):
     def test_changed_snapshot_clears_recommendations_but_refreshes_cart(self):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
-            ('dress', 'New Dress', 'New description', 'Brand', 'Apparel & Accessories',
-             {'local_path': 'new.jpg'}, ['New feature'], 'new-source', 'new-image')]
+            ('dress', 'New description', ['New feature'], {}, {}, 'New Dress', 'Brand',
+             'Apparel & Accessories', {'local_path': 'new.jpg'}, 'new-source', 'new-image')]
         old = {'id': 'dress', 'title': 'Old Dress', 'source_record_sha256': 'old-source',
                'image_sha256': 'old-image', 'text_similarity': .9}
         result = sanitize_apparel_products(connection, {'recommendations': [old], 'cart': [old],
@@ -138,27 +138,27 @@ class StateIntegrityTests(unittest.TestCase):
                 return MagicMock(fetchone=lambda: (1,))
             return MagicMock(rowcount=1)
         connection.execute.side_effect = execute
-        graph = MagicMock()
+        executor = MagicMock()
         def invoke(*args, **kwargs):
             self.assertEqual(depth, 0)
             raise RuntimeError('inference failed')
-        graph.invoke.side_effect = invoke
-        with patch('agent.workflow.psycopg.connect') as connect:
+        executor.side_effect = invoke
+        with patch('agent.sessions.psycopg.connect') as connect, patch('agent.sessions.run_turn', executor):
             connect.return_value.__enter__.return_value = connection
             with self.assertRaisesRegex(RuntimeError, 'inference failed'):
-                run_recommendation_turn(graph, thread_id='test', turn={})
+                run_recommendation_turn(thread_id='test', turn={})
         self.assertTrue(any('pg_advisory_unlock' in c.args[0] for c in connection.execute.call_args_list))
         self.assertTrue(connect.call_args.kwargs['autocommit'])
 
-    def test_busy_session_is_rejected_before_graph_and_api_returns_409(self):
+    def test_busy_session_is_rejected_before_execution_and_api_returns_409(self):
         connection = MagicMock()
         connection.execute.return_value.fetchone.return_value = (False,)
-        graph = MagicMock()
-        with patch('agent.workflow.psycopg.connect') as connect:
+        executor = MagicMock()
+        with patch('agent.sessions.psycopg.connect') as connect, patch('agent.sessions.run_turn', executor):
             connect.return_value.__enter__.return_value = connection
             with self.assertRaises(SessionBusyError):
-                run_recommendation_turn(graph, thread_id='busy', turn={})
-        graph.invoke.assert_not_called()
+                run_recommendation_turn(thread_id='busy', turn={})
+        executor.assert_not_called()
         from agent.api import discover, DiscoverRequest
         from fastapi import HTTPException
         with patch('agent.api.run_recommendation_turn', side_effect=SessionBusyError('Busy')):
@@ -180,12 +180,12 @@ class StateIntegrityTests(unittest.TestCase):
                         return MagicMock(fetchone=lambda: (next(revisions),))
                     return MagicMock(rowcount=0)
                 connection.execute.side_effect = execute
-                graph = MagicMock()
-                graph.invoke.return_value = {'message': 'Must not persist'}
-                with patch('agent.workflow.psycopg.connect') as connect:
+                executor = MagicMock()
+                executor.return_value = {'message': 'Must not persist'}
+                with patch('agent.sessions.psycopg.connect') as connect, patch('agent.sessions.run_turn', executor):
                     connect.return_value.__enter__.return_value = connection
                     with self.assertRaises(SessionBusyError):
-                        run_recommendation_turn(graph, thread_id='conflicting', turn={})
+                        run_recommendation_turn(thread_id='conflicting', turn={})
                 updates = [c for c in connection.execute.call_args_list if c.args[0].startswith('UPDATE')]
                 self.assertEqual(len(updates), 0 if catalog_changes else 1)
                 if updates:
@@ -276,10 +276,10 @@ class SessionConcurrencyDatabaseTests(unittest.TestCase):
         def connect(*args, **kwargs):
             return original_connect(*args, **kwargs, application_name=application)
         with original_connect(settings.database_url.get_secret_value(), autocommit=True) as monitor:
-            graph = MagicMock()
+            executor = MagicMock()
             def invoke(state, **kwargs):
                 with self.assertRaises(SessionBusyError):
-                    run_recommendation_turn(MagicMock(), thread_id=identifier, turn={})
+                    run_recommendation_turn(thread_id=identifier, turn={})
                 # A just-closed competing connection can briefly remain in
                 # pg_stat_activity. Inspect the actual advisory-lock owner.
                 rows = monitor.execute("SELECT state,xact_start FROM pg_stat_activity a WHERE application_name=%s "
@@ -288,16 +288,16 @@ class SessionConcurrencyDatabaseTests(unittest.TestCase):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0], ('idle', None))
                 return {**state, 'message': 'Saved'}
-            graph.invoke.side_effect = invoke
+            executor.side_effect = invoke
             try:
-                with patch('agent.workflow.psycopg.connect', side_effect=connect):
-                    result = run_recommendation_turn(graph, thread_id=identifier, turn={})
+                with patch('agent.sessions.psycopg.connect', side_effect=connect), patch('agent.sessions.run_turn', executor):
+                    result = run_recommendation_turn(thread_id=identifier, turn={})
                 self.assertEqual(result['message'], 'Saved')
                 saved = monitor.execute('SELECT state FROM agent_sessions WHERE thread_id=%s', (identifier,)).fetchone()[0]
                 self.assertEqual(saved['message'], 'Saved')
                 # Normal completion releases the lock, permitting another turn.
-                with patch('agent.workflow.psycopg.connect', side_effect=connect):
-                    run_recommendation_turn(graph, thread_id=identifier, turn={})
+                with patch('agent.sessions.psycopg.connect', side_effect=connect), patch('agent.sessions.run_turn', executor):
+                    run_recommendation_turn(thread_id=identifier, turn={})
             finally:
                 monitor.execute('DELETE FROM agent_sessions WHERE thread_id=%s', (identifier,))
 

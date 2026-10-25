@@ -21,8 +21,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 from agent.config import settings
 from agent.models import Plan, Filters
-from agent.workflow import sanitize_apparel_products
-from rag.retrieval import APPAREL_CATEGORY, retrieve_products
+from agent.sessions import sanitize_apparel_products
+from agent.tools.retrieval import APPAREL_CATEGORY, retrieve_products
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -133,3 +133,5 @@ Authored checks verify specific interpretation/contracts, not general relevance 
 - Interpretation rejected: preserve compound product names and explicit modifiers; rephrase ambiguity. There is no automatic broadening retry.
 - Fewer results: title/phrase evidence can exclude ambiguous listings. Missing metadata stays unknown.
 - Condition requests: search without a new/used/pre-owned requirement. Unsupported saved constraints are sanitized on resume while preserving cart/history.
+
+For source-level call order and runnable subsystem examples, see [the execution walkthrough](walkthrough.md).

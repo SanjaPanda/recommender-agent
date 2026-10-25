@@ -25,9 +25,9 @@ import psycopg
 from agent.config import ROOT, settings
 from rag import APPAREL_CATEGORY
 from rag.catalog import local_asset
-from rag.embed_text import document_text, embed_texts, model_digest
-from rag.clip_runtime import text_embedding, model_version
-from rag.retrieval import _fuse_rankings
+from agent.tools.embeddings import document_text, embed_texts, model_digest
+from agent.tools.clip_runtime import text_embedding, model_version
+from agent.tools.retrieval import _fuse_rankings
 
 RESULTS = ROOT / 'observations/experiments/retrieval'
 CACHE = ROOT / '.data/experiments/retrieval/embeddings'
@@ -94,8 +94,8 @@ def load_catalog() -> tuple[list[dict], np.ndarray, np.ndarray, dict]:
             for name in ('numpy', 'Pillow', 'torch', 'transformers', 'psycopg', 'pgvector')},
         'cases_sha256': hashlib.sha256((ROOT / 'notebooks/cases.json').read_bytes()).hexdigest(),
         'code_sha256': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in (
-            'notebooks/retrieval_lab.py', 'src/rag/bm25.py', 'src/rag/embed_text.py',
-            'src/rag/clip_runtime.py', 'src/rag/retrieval.py')},
+            'notebooks/retrieval_lab.py', 'src/agent/tools/bm25.py', 'src/rag/embed_text.py',
+            'src/agent/tools/clip_runtime.py', 'src/agent/tools/retrieval.py')},
         'parameters': {'top_k': 5, 'rrf_k': 60, 'rrf_base_weights': [0.50, 0.50, 0.50],
                        'rrf_component_pool': 50, 'clip_device': 'cpu',
                        'embedding_num_gpu': settings.embedding_num_gpu, 'encoder_options': 'existing application defaults'},

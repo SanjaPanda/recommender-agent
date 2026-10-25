@@ -2,13 +2,13 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from rag.retrieval import retrieve_products
+from agent.tools.retrieval import retrieve_products
 
 
 class RetrievalTests(unittest.TestCase):
     def setUp(self):
         for name in ('text_model_version', 'clip_model_version'):
-            version = patch('rag.retrieval.' + name, return_value='test-revision')
+            version = patch('agent.tools.retrieval.' + name, return_value='test-revision')
             version.start()
             self.addCleanup(version.stop)
 
@@ -28,11 +28,11 @@ class RetrievalTests(unittest.TestCase):
             )])
 
         connection.execute.side_effect = execute
-        with patch("rag.retrieval.psycopg.connect") as connect, \
-             patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval._search_bm25", return_value=[]), \
-             patch("rag.retrieval.embed_texts", return_value=[[1.0, 0.0]]), \
-             patch("rag.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, \
+             patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval._search_bm25", return_value=[]), \
+             patch("agent.tools.retrieval.embed_texts", return_value=[[1.0, 0.0]]), \
+             patch("agent.tools.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
             connect.return_value.__enter__.return_value = connection
             results = retrieve_products(query_context="blue cotton shirt")
 
@@ -68,11 +68,11 @@ class RetrievalTests(unittest.TestCase):
             )])
 
         connection.execute.side_effect = execute
-        with patch("rag.retrieval.psycopg.connect") as connect, \
-             patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval._search_bm25", return_value=[]), \
-             patch("rag.retrieval.embed_texts", return_value=[[0.0, 1.0]]), \
-             patch("rag.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, \
+             patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval._search_bm25", return_value=[]), \
+             patch("agent.tools.retrieval.embed_texts", return_value=[[0.0, 1.0]]), \
+             patch("agent.tools.retrieval.clip_text_embedding", return_value=[0.0, 1.0]):
             connect.return_value.__enter__.return_value = connection
             results = retrieve_products(
                 query_context="blue cotton shirt", selected_product_ids=["example-1"])

@@ -50,6 +50,8 @@ def is_relevant_product(
         required_title_color: Explicit title color filter from the shopping plan.
         required_product_type: Explicit product type filter from the shopping plan.
         ignore_query_attributes: Relax color/product terms for fallback suggestions.
+        product_phrase: Grounded title phrase; None allows conservative family
+            inference, while an empty phrase deliberately leaves type unresolved.
 
     Returns:
         True when the product clears a retrieval cutoff and the available text

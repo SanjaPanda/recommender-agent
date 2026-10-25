@@ -3,9 +3,9 @@ import math
 import unittest
 from unittest.mock import MagicMock, patch
 
-from rag.bm25 import rank, tokens
-import rag.bm25 as bm25
-from rag.retrieval import _search_bm25, retrieve_products
+from agent.tools.bm25 import rank, tokens
+import agent.tools.bm25 as bm25
+from agent.tools.retrieval import _search_bm25, retrieve_products
 
 
 def product(identifier, score):
@@ -16,7 +16,7 @@ def product(identifier, score):
 class BM25Tests(unittest.TestCase):
     def setUp(self):
         for name in ('text_model_version', 'clip_model_version'):
-            version = patch('rag.retrieval.' + name, return_value='test-revision')
+            version = patch('agent.tools.retrieval.' + name, return_value='test-revision')
             version.start()
             self.addCleanup(version.stop)
 
@@ -25,7 +25,7 @@ class BM25Tests(unittest.TestCase):
         bm25._document_counts.cache_clear()
         full = ['cotton shirt', 'cotton shirt', 'linen dress']
         original = rank('cotton', full)
-        with patch('rag.bm25.tokens', wraps=tokens) as tokenize:
+        with patch('agent.tools.bm25.tokens', wraps=tokens) as tokenize:
             self.assertEqual(rank('cotton', full), original)
             self.assertEqual(tokenize.call_count, 1)  # query only
         self.assertAlmostEqual(rank('cotton', [full[0]])[0][1], math.log(1 + .5 / 1.5))
@@ -78,12 +78,12 @@ class BM25Tests(unittest.TestCase):
 
     def test_consensus_wins_rrf_and_contributions_sum(self):
         connection = MagicMock()
-        with patch("rag.retrieval.psycopg.connect") as connect, \
-             patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval.embed_texts", return_value=[[1., 0.]]), \
-             patch("rag.retrieval.clip_text_embedding", return_value=[1., 0.]), \
-             patch("rag.retrieval._search_bm25", return_value=[product("keyword-only", 20), product("consensus", 3)]), \
-             patch("rag.retrieval._search_embedding", side_effect=[
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, \
+             patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval.embed_texts", return_value=[[1., 0.]]), \
+             patch("agent.tools.retrieval.clip_text_embedding", return_value=[1., 0.]), \
+             patch("agent.tools.retrieval._search_bm25", return_value=[product("keyword-only", 20), product("consensus", 3)]), \
+             patch("agent.tools.retrieval._search_embedding", side_effect=[
                  [product("consensus", .8)], [product("consensus", .3)]
              ]):
             connect.return_value.__enter__.return_value = connection

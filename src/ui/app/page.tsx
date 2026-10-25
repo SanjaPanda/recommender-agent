@@ -1,30 +1,8 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { A2UIProvider } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/core/A2UIProvider.mjs";
-import * as A2UIRendererExports from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/core/A2UIRenderer.mjs";
-import { useA2UI } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/hooks/useA2UI.mjs";
+import { useEffect, useRef, useState } from "react";
 import { catalog, ProductActions } from "./catalog";
-import type { A2UIMessage, AgentTraceEvent, Product } from "./a2ui";
-
-const A2UIRenderer = (A2UIRendererExports as unknown as {
-  default: ComponentType<{ surfaceId: string; fallback?: ReactNode }>;
-}).default;
-
-type AgentResponse = {
-  thread_id: string; a2ui_surface_id: string; products: Product[];
-  selected_product_ids: string[]; status: string; message: string;
-  query_context: string;
-  search_intent?: { product_phrase: string; search_terms: string[];
-    attributes: { name: string; value: string; evidence: string; excluded: boolean }[] } | null;
-  categories: { name: string; count: number }[];
-  cart: { id: string; title: string }[];
-  preferences: { requirement: string; strength: string }[];
-  filters: { brand?: string | null; category_prefixes?: string[]; title_color?: string | null; title_product?: string | null };
-  removed_filters?: string[];
-  trace: AgentTraceEvent[];
-  a2ui_operations: A2UIMessage[];
-};
+import { A2UIProvider, A2UIRenderer, useA2UI, type AgentResponse } from "./a2ui";
 
 const EXAMPLE_SEARCHES = ["Blue clothes", "Black cotton dress", "Pink bow tie"];
 const FILTER_LABELS: Record<string, string> = {

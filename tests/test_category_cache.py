@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import psycopg
 from psycopg.types.json import Jsonb
 from agent.config import settings
-import rag.retrieval as retrieval
+import agent.tools.retrieval as retrieval
 
 
 class CategoryCacheTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class CategoryCacheTests(unittest.TestCase):
                 return MagicMock(fetchall=lambda: [('Apparel & Accessories > Clothing', revision[0])])
             return MagicMock()
         connection.execute.side_effect = execute
-        with patch('rag.retrieval.psycopg.connect') as connect:
+        with patch('agent.tools.retrieval.psycopg.connect') as connect:
             connect.return_value.__enter__.return_value = connection
             first = retrieval.list_categories()
             first[0]['count'] = -1

@@ -109,7 +109,8 @@ def main() -> None:
     import psycopg
     import agent.api as api
     import agent.workflow as workflow
-    import rag.retrieval as retrieval
+    import agent.sessions as sessions
+    import agent.tools.retrieval as retrieval
     from agent.config import settings
 
     report = {
@@ -152,8 +153,8 @@ def main() -> None:
                         patches.enter_context(patch.object(module, attribute,
                             recorder.wrap(label, getattr(module, attribute))))
                     patches.enter_context(patch.object(urllib.request, 'urlopen', recorder.urlopen(urllib.request.urlopen)))
-                    with recorder.span('session_graph'):
-                        state = workflow.run_recommendation_turn(workflow.build_recommendation_agent(),
+                    with recorder.span('session_turn'):
+                        state = sessions.run_recommendation_turn(
                                                                 thread_id=thread_id, turn={'query': query})
                     with recorder.span('api_serialization'):
                         response = api._response(state, thread_id, 'Profile results', create_surface=True)

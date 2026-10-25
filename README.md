@@ -1,6 +1,6 @@
 # Multimodal Apparel Discovery
 
-A local recommendation application for an Amazon Reviews 2023 Apparel & Accessories catalog, bounded to 2,000 products. Search with text, refine preferences, select up to three products as visual examples, inspect listing details and explanations, and maintain a persistent cart.
+A local recommendation application for an Amazon Reviews 2023 Apparel & Accessories catalog, bounded to 2,000 products. Search with text, refine preferences, select up to three products as visual examples, inspect listing details and explanations, and maintain a persistent cart. The execution path is a direct Python function: route, optionally retrieve, then respond.
 
 BM25, Nomic text embeddings and CLIP image embeddings contribute separate ranked lists combined with weighted reciprocal-rank fusion. A local Ollama router returns updated shopping state and search intent in one call; cart buttons update state directly. PostgreSQL/pgvector stores catalog data, vectors and sessions; Next.js renders the web/A2UI interface.
 
@@ -30,8 +30,9 @@ Open <http://localhost:3000>. The API and Ollama run on the host; PostgreSQL and
 
 | Path | Responsibility |
 | --- | --- |
-| `src/agent/` | Contracts, local-model calls, LangGraph workflow, sessions and API |
-| `src/rag/` | Acquisition, normalization, import, embeddings and retrieval |
+| `src/agent/` | Contracts, direct shopping turns, local-model calls, protected sessions and API |
+| `src/agent/tools/` | Runtime retrieval, BM25 and shared local encoders |
+| `src/rag/` | Offline acquisition, normalization, import, embedding jobs and retrieval CLI |
 | `src/ui/` | Next.js/A2UI web interface |
 | `migrations/` | Current schema and ordered schema changes |
 | `scripts/` | Database maintenance and application checks |
@@ -39,6 +40,8 @@ Open <http://localhost:3000>. The API and Ollama run on the host; PostgreSQL and
 | `docs/` | [Architecture](docs/architecture.md), [agent behavior](docs/Agent.md), [database](docs/database.md) and [setup](docs/SETUP.md) |
 | `observations/` | Engineering decisions and verified checkpoints |
 | `archive/` | Reference material outside normal development and setup |
+
+Read the [execution walkthrough](docs/walkthrough.md) for startup, request paths, debugging and the before/after architecture comparison.
 
 ## Validate
 

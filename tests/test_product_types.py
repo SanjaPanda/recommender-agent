@@ -4,13 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from agent.relevance import is_relevant_product
 from rag.product_types import product_type, requested_product_type
-from rag.retrieval import retrieve_products
+from agent.tools.retrieval import retrieve_products
 
 
 class ProductTypeTests(unittest.TestCase):
     def setUp(self):
         for name in ('text_model_version', 'clip_model_version'):
-            version = patch('rag.retrieval.' + name, return_value='test-revision')
+            version = patch('agent.tools.retrieval.' + name, return_value='test-revision')
             version.start()
             self.addCleanup(version.stop)
 
@@ -39,10 +39,10 @@ class ProductTypeTests(unittest.TestCase):
                 ("bow", "Blue Bow Tie", "", None, "Apparel & Accessories", None, .6)]
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = rows
-        with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval._search_bm25", return_value=[]), \
-             patch("rag.retrieval.embed_texts", return_value=[[1., 0.]]), \
-             patch("rag.retrieval.clip_text_embedding", return_value=[1., 0.]):
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval._search_bm25", return_value=[]), \
+             patch("agent.tools.retrieval.embed_texts", return_value=[[1., 0.]]), \
+             patch("agent.tools.retrieval.clip_text_embedding", return_value=[1., 0.]):
             connect.return_value.__enter__.return_value = connection
             result = retrieve_products(query_context="blue bow tie", filters={"title_product": "tie"}, limit=1)
         self.assertEqual([r["id"] for r in result], ["bow"])
@@ -78,10 +78,10 @@ class ProductTypeTests(unittest.TestCase):
                  "Apparel & Accessories > Clothing", None, .6)]
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = rows
-        with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval._search_bm25", return_value=[]), \
-             patch("rag.retrieval.embed_texts", return_value=[[1., 0.]]), \
-             patch("rag.retrieval.clip_text_embedding", return_value=[1., 0.]):
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval._search_bm25", return_value=[]), \
+             patch("agent.tools.retrieval.embed_texts", return_value=[[1., 0.]]), \
+             patch("agent.tools.retrieval.clip_text_embedding", return_value=[1., 0.]):
             connect.return_value.__enter__.return_value = connection
             result = retrieve_products(query_context="cotton shirt", limit=1)
         self.assertEqual([r["id"] for r in result], ["shirt"])
@@ -97,8 +97,8 @@ class ProductTypeTests(unittest.TestCase):
                 ("jeans", "Black Jeans", "", None, "Apparel & Accessories > Clothing", None, .95),
                 ("jacket", "Winter Jacket", "", None, "Apparel & Accessories > Clothing", None, .7)])
         connection.execute.side_effect = execute
-        with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
-             patch("rag.retrieval.embed_texts") as embed:
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, patch("agent.tools.retrieval.register_vector"), \
+             patch("agent.tools.retrieval.embed_texts") as embed:
             connect.return_value.__enter__.return_value = connection
             result = retrieve_products(selected_product_ids=["seed"])
             embed.assert_not_called()
@@ -112,7 +112,7 @@ class ProductTypeTests(unittest.TestCase):
             return MagicMock(fetchall=lambda: [
                 ("shirt", "Cotton Shirt", "", None, "Apparel & Accessories > Clothing", None, .7)])
         connection.execute.side_effect = execute
-        with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"):
+        with patch("agent.tools.retrieval.psycopg.connect") as connect, patch("agent.tools.retrieval.register_vector"):
             connect.return_value.__enter__.return_value = connection
             result = retrieve_products(selected_product_ids=["seed"], filters={"title_product": "shirt"})
         self.assertEqual([r["id"] for r in result], ["shirt"])

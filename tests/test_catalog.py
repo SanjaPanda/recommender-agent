@@ -12,7 +12,7 @@ from PIL import Image
 
 from agent.config import settings
 from rag.catalog import Manifest, historical_price, image_urls, ingest, local_asset, normalize
-from rag.embed_text import document_text
+from agent.tools.embeddings import document_text
 
 
 def fixture(root):
@@ -179,7 +179,7 @@ class CatalogDatabaseTests(unittest.TestCase):
             ingest(self.connection, path)
 
     def test_bm25_searches_features_in_filtered_database_and_excludes_seeds(self):
-        from rag.retrieval import _search_bm25, filter_clause
+        from agent.tools.retrieval import _search_bm25, filter_clause
         from psycopg.types.json import Jsonb
         self.row["details"]["Brand"] = self.config["source_id"]
         self.row["features"] = ["Waterproof needleword cotton"]

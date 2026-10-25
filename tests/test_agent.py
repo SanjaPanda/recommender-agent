@@ -7,8 +7,9 @@ from pydantic import ValidationError
 from agent.config import Settings, settings
 from agent.llm import ModelError
 from agent.models import ExplanationRequest, Filters, Plan, ProductFacts, RouterDecision, SearchIntent, Summary
-from agent.workflow import build_recommendation_agent, sanitize_apparel_products
-from rag.retrieval import filter_clause
+from agent.workflow import run_turn
+from agent.sessions import sanitize_apparel_products
+from agent.tools.retrieval import filter_clause
 
 CATEGORIES = [{'name': 'Apparel & Accessories > Clothing', 'count': 10}]
 PRODUCT = {'id': 'one', 'title': 'Blue Dress', 'description': 'Cotton dress',
@@ -109,9 +110,9 @@ class AgentTests(unittest.TestCase):
     @patch('agent.workflow.list_categories', return_value=CATEGORIES)
     def test_new_session_and_reset_preserve_cart(self, _):
         with patch('agent.workflow.complete') as model:
-            state = build_recommendation_agent().invoke({'turn': {}, 'cart': [{'id': 'one', 'title': 'Shirt'}]})
+            state = run_turn({'turn': {}, 'cart': [{'id': 'one', 'title': 'Shirt'}]})
             self.assertEqual(state['status'], 'categories')
-            reset = build_recommendation_agent().invoke({**state, 'turn': {'query': '#buynew'}})
+            reset = run_turn({**state, 'turn': {'query': '#buynew'}})
             self.assertEqual(reset['cart'], state['cart'])
             self.assertEqual(reset['selected_product_ids'], [])
             model.assert_not_called()
@@ -121,8 +122,8 @@ class AgentTests(unittest.TestCase):
         state = {'plan': Plan(intent='recommend').model_dump(), 'recommendations': [PRODUCT],
                  'turn': {'action': 'cart_add', 'product_ids': ['one']}}
         with patch('agent.workflow.complete') as model:
-            result = build_recommendation_agent().invoke(state)
+            result = run_turn(state)
             self.assertEqual(result['cart'][0]['id'], 'one')
             model.assert_not_called()
         with self.assertRaises(ValueError):
-            build_recommendation_agent().invoke({**state, 'turn': {'action': 'cart_add', 'product_ids': ['invented']}})
+            run_turn({**state, 'turn': {'action': 'cart_add', 'product_ids': ['invented']}})

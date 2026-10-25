@@ -5,11 +5,48 @@ or inferred attribute truth. Missing or conflicting evidence stays unknown.
 """
 import math
 import re
+
+import psycopg
 from typing import Any
 
 from rag.product_types import product_type, requested_product_type
 from rag.phrases import phrase_in_title
 from .relevance import COLOR_TERMS
+from rag import APPAREL_CATEGORY
+
+
+def load_products(connection: psycopg.Connection, product_ids: list[str]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Read current apparel facts and listing evidence in one parameterized batch.
+
+    Args:
+        connection: Open psycopg connection; the caller owns its transaction.
+        product_ids: Stable IDs from saved cards, selected examples or cart items.
+
+    Returns:
+        Two ID-indexed mappings: refreshable facts and public listing details.
+        Missing/out-of-scope IDs are absent. This function never writes data.
+
+    Raises:
+        psycopg.Error: If the current catalog cannot be read.
+    """
+    if not product_ids:
+        return {}, {}
+    rows = connection.execute(
+        "SELECT id,description,features,raw_source,attributes->'attributes',title,brand,"
+        "raw_source->>'ground_truth_category',image,source_record_sha256,image_sha256 "
+        "FROM products WHERE id=ANY(%s) AND (raw_source->>'ground_truth_category'=%s "
+        "OR starts_with(raw_source->>'ground_truth_category',%s))",
+        (product_ids, APPAREL_CATEGORY, APPAREL_CATEGORY + ' > '),
+    ).fetchall()
+    facts, listings = {}, {}
+    for row in rows:
+        fields = dict(zip(('description', 'features', 'raw_source', 'details', 'title',
+                           'brand', 'category', 'image_meta', 'source_record_sha256',
+                           'image_sha256'), row[1:]))
+        listings[row[0]] = source_listing(fields.pop('raw_source', None) or {},
+            fields.get('description'), fields.get('features') or [], fields.pop('details', None) or {})
+        facts[row[0]] = fields
+    return facts, listings
 
 
 def refresh_product_facts(product: dict[str, Any], facts: dict[str, Any],
@@ -39,7 +76,20 @@ def refresh_product_facts(product: dict[str, Any], facts: dict[str, Any],
 
 def listing_checks(title: str, details: dict[str, Any], query: str, filters: dict[str, Any],
                    product_phrase: str | None = None) -> list[dict[str, str]]:
-    """Compare requested color/type with explicit listing evidence only."""
+    """Compare requested color/type with explicit listing evidence only.
+
+    Args:
+        title: Current source listing title.
+        details: Structured source fields; only explicit color fields support color.
+        query: Product request used for visible checks.
+        filters: Saved explicit title_color/title_product constraints.
+        product_phrase: Grounded interpreted phrase; None permits legacy family
+            inference, while an empty string intentionally disables that inference.
+
+    Returns:
+        Label/status/evidence mappings. Missing or conflicting color is unknown;
+        neither title matches nor similarity proves image or variant identity.
+    """
     colors = set(re.findall(r"\b[a-z]+\b", query.casefold())) & COLOR_TERMS
     negative = {m[1].lower() for m in re.finditer(r"\b(?:not|no|without|avoid|exclude)\s+([a-z]+)\b", query, re.I)} & COLOR_TERMS
     if filters.get("title_color"):
@@ -81,7 +131,18 @@ def listing_checks(title: str, details: dict[str, Any], query: str, filters: dic
 
 
 def source_listing(raw: dict[str, Any], description: str | None, features: list[str], details: dict[str, Any]) -> dict[str, Any]:
-    """Expose listing facts, preserving missing ratings as null rather than zero."""
+    """Expose listing facts, preserving missing ratings as null rather than zero.
+
+    Args:
+        raw: Original source record with optional rating/count/store fields.
+        description: Preserved source description, or None.
+        features: Source bullets; non-string entries are omitted.
+        details: Structured fields; scalar values are exposed as strings.
+
+    Returns:
+        Public listing data with validated snapshot ratings. Unknown facts are
+        not generated, and zero remains a valid supplied rating/count.
+    """
     rating, count = raw.get("average_rating"), raw.get("rating_number")
     valid_rating = isinstance(rating, (int, float)) and not isinstance(rating, bool) and math.isfinite(rating) and 0 <= rating <= 5
     valid_count = isinstance(count, int) and not isinstance(count, bool) and count >= 0

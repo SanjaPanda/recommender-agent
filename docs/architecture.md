@@ -2,7 +2,7 @@
 
 ## Components and data flow
 
-The application uses one LangGraph workflow with local inference. PostgreSQL/pgvector and the Next.js web UI run in Docker; FastAPI and Ollama run on the host. Configuration is validated by `agent.config.Settings` from the project `.env` and process environment; `DATABASE_URL` is secret-wrapped. Compose binds services to loopback and retains the database volume.
+The application uses a direct Python turn workflow with local inference. PostgreSQL/pgvector and the Next.js web UI run in Docker; FastAPI and Ollama run on the host. Configuration is validated by `agent.config.Settings` from the project `.env` and process environment; `DATABASE_URL` is secret-wrapped. Compose binds services to loopback and retains the database volume.
 
 ```text
 Pinned Amazon metadata + source manifest
@@ -23,12 +23,14 @@ User text / selected catalog products
 | --- | --- |
 | `rag.download_catalog` | Bounded HTTPS acquisition, image attempts and rejection reports |
 | `rag.catalog` | Manifest validation, metadata/image normalization, provenance registration and upserts |
-| `rag.embed_text`, `rag.embed_images`, `rag.clip_runtime` | Revisioned embedding generation and cached query encoders |
-| `rag.retrieval`, `rag.bm25` | Shared SQL eligibility, candidate scoring and RRF |
+| `rag.embed_text`, `rag.embed_images` | Offline revisioned vector generation |
+| `agent.tools.embeddings`, `agent.tools.clip_runtime` | Shared validated local encoders |
+| `agent.tools.retrieval`, `agent.tools.bm25` | Shared SQL eligibility, candidate scoring and RRF |
 | `rag.phrases`, `rag.product_types` | Request/title evidence and conservative title-family matching |
 | `agent.models`, `agent.conditions` | Typed state/turn/router contracts and unsupported condition detection |
 | `agent.search_intent`, `agent.relevance` | Grounded interpretation and result eligibility |
-| `agent.workflow` | Router, retrieval and response nodes; durable turn execution |
+| `agent.workflow` | Direct router/retrieval/response calls and safe trace events |
+| `agent.sessions` | Snapshot normalization, advisory locks, guarded load/save transactions |
 | `agent.api`, `agent.product_evidence`, `agent.a2ui` | HTTP interface, current listing evidence and UI operations |
 | `src/ui/app/` | Shopping interface, product cards, details and session controls |
 
@@ -46,7 +48,7 @@ Acquisition is bounded by metadata lines/bytes, image bytes/attempts and wall ti
 
 Textual application searches use a typed local LLM `SearchIntent`: a request-supported core product phrase, proposed equivalent search terms and quoted attributes. Phrase validation accepts supported regular inflections and joined/hyphenated spelling. Negated products cannot become positive intent; meaningful modifiers must be accounted for. Empty/unclear product intent remains within apparel-scoped semantic/lexical search.
 
-A nonempty interpreted phrase must occur at a main-title segment boundary before candidate limits in every modality. Description-only or accessory-compatibility mentions do not establish the product. Proposed terms expand BM25 only; vector queries retain the original effective request. Saved interpretation is reused only when query and preference text are identical. Invalid extraction fails explicitly without a guessing fallback.
+A nonempty interpreted phrase must occur at a main-title segment boundary before candidate limits in every modality. Description-only or accessory-compatibility mentions do not establish the product. Proposed terms expand BM25 only; vector queries retain the original effective request. `prepare_query()` creates request-local Nomic/CLIP vectors and revision identities once, reused for primary and optional fallback SQL searches. No cross-session query cache is introduced. Saved interpretation is reused only when query and preference text are identical. Invalid extraction fails explicitly without a guessing fallback.
 
 Direct retrieval and image-only searches can use conservative product-family checks. Explicit title-product filters take precedence; an image-only family is inherited only when every selected seed has the same known primary title type.
 
@@ -64,6 +66,8 @@ Optional summaries use bounded supplied facts and have a 15-second network timeo
 
 Session turns acquire a nonblocking connection-scoped advisory lock for their thread. Inference runs outside transactions. Short repeatable-read load/save transactions and compare-and-save protect against overlaps, external snapshot edits and catalog changes. A competing or stale turn returns HTTP 409.
 
+Saved JSON contains only durable shopping fields. Request inputs, candidates, categories, traces, route and the derived query_context are omitted. Resume derives query_context from Plan.query; older saved fields remain readable without a bulk migration.
+
 Saved cards carry source-record/image hashes. Resume refreshes current apparel facts, removes invalid/changed recommendations and selections, and refreshes cart facts while clearing stale scores. Unsupported saved fields are sanitized before strict plan validation. Session rows and message history remain. Images are read from current product metadata.
 
 Category counts use an eight-entry cache keyed by database identity and committed catalog revision. A statement trigger increments the revision for product writes, and a read-only repeatable-read snapshot reads the revision and counts together. Restart API workers after a database restore to discard process-local caches.
@@ -76,4 +80,34 @@ Catalog writers share a maintenance advisory lock. Staged publication records me
 
 Price/budget and new/used condition filtering are unsupported. Arbitrary image uploads, approximate indexes, reranking and hosted inference are outside the application. Literal title evidence can reduce recall and cannot prove material, visual identity or correct semantic classification. The bounded sequential sample is not representative, and relevance quality has no independently judged benchmark. Administrative vector writes still require correct model/dimension metadata; optional preprocessing/input hashes are not populated by the encoder commands.
 
-Each completed node emits a safe per-turn trace with duration, route/status and result/modality counts. Traces omit prompts, user text, product descriptions and model reasoning, and are not persisted. See [agent behavior](Agent.md), [setup](SETUP.md) and [database contracts](database.md).
+Each completed stage emits a safe per-turn trace with duration, route/status and result/modality counts. Traces omit prompts, user text, product descriptions and model reasoning, and are not persisted. See [agent behavior](Agent.md), [setup](SETUP.md) and [database contracts](database.md).
+
+## Execution architecture
+
+```mermaid
+flowchart TD
+    UI[Next.js UI or CLI] --> Validate[Validate request]
+    Validate --> Session[Session lock and short load transaction]
+    Session --> Route[run_turn: route]
+    Route -->|explicit action or clarification| Respond[respond]
+    Route -->|recommend| Retrieve[prepare query vectors and retrieve]
+    Retrieve --> Rank[BM25 and vector ranks, RRF, relevance gate]
+    Rank -->|no strong match| Fallback[optional relaxed title search with same vectors]
+    Rank --> Respond
+    Fallback --> Respond
+    Respond --> Save[Revision check and compare-and-save]
+    Save --> Output[Current listing evidence and A2UI response]
+```
+
+The former fixed three-node LangGraph added graph compilation, invoke/config
+plumbing and an unused checkpointer option while session durability was already
+application-owned. Direct calls now express the same branch and preserve named
+router/retrieve/respond trace events. Session persistence has its own module;
+runtime search functions no longer import offline embedding command code. No new
+framework, model, ranking weights or relevance thresholds were introduced.
+
+A2UI remains the UI protocol. `src/ui/app/a2ui.ts` contains the installed renderer's
+internal imports and the single product schema; the TypeScript Product type is
+inferred from it. Page and gallery components use that adapter.
+
+See [walkthrough](walkthrough.md) for all request paths and the staged comparison.

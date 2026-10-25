@@ -47,6 +47,16 @@ def rank(query: str, documents: list[str], *, k1: float = 1.2, b: float = 0.75) 
 
     Statistics are calculated over the eligible filtered corpus. Repeated query
     words count once. Scores are lexical relevance, not cosine or probability.
+
+    Args:
+        query: Keyword request, optionally expanded with equivalent phrases.
+        documents: Ordered text of every eligible product in the filtered corpus.
+        k1: Term-frequency saturation parameter; defaults to 1.2.
+        b: Document-length normalization weight; defaults to 0.75.
+
+    Returns:
+        Positive (document index, score) pairs, descending by score with stable
+        index order for ties. Empty/no-match queries return an empty list.
     """
     terms = set(tokens(query))
     if not terms:

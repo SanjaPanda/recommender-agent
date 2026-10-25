@@ -5,7 +5,7 @@ import argparse
 import json
 
 from . import validate_category_prefixes
-from .retrieval import retrieve_products
+from agent.tools.retrieval import retrieve_products
 
 
 def main() -> None:

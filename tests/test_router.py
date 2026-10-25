@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
 from agent.models import Filters, Plan, RouterDecision, SearchIntent, SessionTurn
-from agent.workflow import build_recommendation_agent, sanitize_apparel_products
+from agent.workflow import run_turn
+from agent.sessions import sanitize_apparel_products
 
 
 class RouterTests(unittest.TestCase):
@@ -21,8 +22,8 @@ class RouterTests(unittest.TestCase):
             product_phrase='dress', attributes=[dict(name='color', value='blue', evidence='blue')]))
         with patch('agent.workflow.complete', return_value=decision) as model, \
              patch('agent.workflow.extract_search_intent') as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[{'id': 'dress', 'title': 'Blue Dress'}]) as retrieve:
-            result = build_recommendation_agent().invoke({'turn': {'query': 'blue dress'}})
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[{'id': 'dress', 'title': 'Blue Dress'}]) as retrieve:
+            result = run_turn({'turn': {'query': 'blue dress'}})
         model.assert_called_once()
         extract.assert_not_called()
         self.assertTrue(model.call_args.args[2].is_new_session)
@@ -35,8 +36,8 @@ class RouterTests(unittest.TestCase):
         decision = RouterDecision(**previous.model_dump(), search_intent=SearchIntent(product_phrase='dress',
             attributes=[dict(name='material', value='cotton', evidence='cotton')]))
         with patch('agent.workflow.complete', return_value=decision) as model, \
-             patch('agent.workflow.retrieve_products', return_value=[]):
-            result = build_recommendation_agent().invoke({'plan': previous.model_dump(),
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]):
+            result = run_turn({'plan': previous.model_dump(),
                 'messages': [{'role': 'user', 'content': 'previous search'}], 'turn': {'refinement': 'keep cotton'}})
         request = model.call_args.args[2]
         self.assertFalse(request.is_new_session)
@@ -48,8 +49,8 @@ class RouterTests(unittest.TestCase):
         previous = Plan(intent='recommend', filters=Filters(brand='Nike'))
         decision = RouterDecision(intent='recommend', removed_filters=['brand'])
         with patch('agent.workflow.complete', return_value=decision), \
-             patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
-            result = build_recommendation_agent().invoke({'plan': previous.model_dump(),
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
+            result = run_turn({'plan': previous.model_dump(),
                 'turn': {'refinement': 'Any brand is fine'}})
         self.assertIsNone(result['plan']['filters']['brand'])
         self.assertEqual(result['removed_filters'], ['brand'])
@@ -74,8 +75,8 @@ class RouterTests(unittest.TestCase):
             RouterDecision.model_validate({'intent': 'clarify', 'query': 'shoes', 'filters': {'brand': 'Nike'}},
                                           context={'previous_plan': previous})
         decision = RouterDecision(**{**previous.model_dump(), 'intent': 'clarify', 'message': 'Which preference?'})
-        with patch('agent.workflow.complete', return_value=decision), patch('agent.workflow.retrieve_products') as retrieve:
-            result = build_recommendation_agent().invoke({'plan': previous.model_dump(),
+        with patch('agent.workflow.complete', return_value=decision), patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products') as retrieve:
+            result = run_turn({'plan': previous.model_dump(),
                 'recommendations': [{'id': 'dress'}], 'cart': [{'id': 'cart'}],
                 'turn': {'query': 'Change that'}})
         self.assertEqual(result['plan'], previous.model_dump())
@@ -90,8 +91,8 @@ class RouterTests(unittest.TestCase):
                 attributes=[dict(name='color', value='black', evidence='black')]))
         with patch('agent.workflow.complete', return_value=decision) as model, \
              patch('agent.workflow.extract_search_intent') as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[{'id': 'dress', 'title': 'Black Dress'}]) as retrieve:
-            result = build_recommendation_agent().invoke({'plan': previous.model_dump(),
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[{'id': 'dress', 'title': 'Black Dress'}]) as retrieve:
+            result = run_turn({'plan': previous.model_dump(),
                 'turn': {'refinement': 'find one in black'}})
         model.assert_called_once()
         extract.assert_not_called()
@@ -104,11 +105,11 @@ class RouterTests(unittest.TestCase):
     def test_explicit_category_action_and_examples_use_existing_state(self):
         with patch('agent.workflow.complete') as model, \
              patch('agent.workflow.extract_search_intent') as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
-            result = build_recommendation_agent().invoke({'turn': {
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
+            result = run_turn({'turn': {
                 'category_prefixes': ['Apparel & Accessories > Clothing']}})
             self.assertEqual(result['plan']['filters']['category_prefixes'], ['Apparel & Accessories > Clothing'])
-            build_recommendation_agent().invoke({'plan': Plan(intent='recommend').model_dump(),
+            run_turn({'plan': Plan(intent='recommend').model_dump(),
                 'recommendations': [{'id': 'seed'}], 'turn': {'selected_product_ids': ['seed']}})
         self.assertEqual(retrieve.call_args.kwargs['selected_product_ids'], ['seed'])
         model.assert_not_called()
@@ -130,8 +131,8 @@ class RouterTests(unittest.TestCase):
             'messages': [{'role': 'user', 'content': 'saved request'}], 'uncertain': [], 'excluded_count': 0}
         before = deepcopy(snapshot)
         connection = MagicMock()
-        connection.execute.return_value.fetchall.return_value = [('dress', 'Dress', '', 'Brand',
-            'Apparel & Accessories > Clothing', None, [], None, None)]
+        connection.execute.return_value.fetchall.return_value = [('dress', '', [], {}, {}, 'Dress', 'Brand',
+            'Apparel & Accessories > Clothing', None, None, None)]
         result = sanitize_apparel_products(connection, snapshot)
         Plan.model_validate(result['plan'])
         self.assertEqual(result['plan']['filters']['category_prefixes'], ['Apparel & Accessories > Clothing'])
@@ -164,8 +165,8 @@ class RouterTests(unittest.TestCase):
                                   search_intent=SearchIntent(product_phrase='dress'))
         with patch('agent.workflow.complete', return_value=decision), \
              patch('agent.workflow.extract_search_intent') as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
-            result = build_recommendation_agent().invoke({'plan': previous.model_dump(),
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
+            result = run_turn({'plan': previous.model_dump(),
                 'turn': {'refinement': 'Adidas instead. Blue is fine; remove the exclusion.'}})
         self.assertEqual(result['plan']['preferences'], [])
         self.assertEqual(result['removed_filters'], [])  # Replacement is not removal.
@@ -178,8 +179,8 @@ class RouterTests(unittest.TestCase):
         decision = RouterDecision(intent='recommend', query='dress', filters=Filters(category_prefixes=[category]),
                                   search_intent=SearchIntent(product_phrase='dress'))
         with patch('agent.workflow.complete', return_value=decision) as model, \
-             patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
-            build_recommendation_agent().invoke({'turn': {'query': 'dress', 'category_prefixes': [category]}})
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
+            run_turn({'turn': {'query': 'dress', 'category_prefixes': [category]}})
         self.assertEqual(model.call_args.args[2].previous_plan.filters.category_prefixes, [category])
         self.assertEqual(retrieve.call_args.kwargs['query_context'], 'dress')
         self.assertEqual(retrieve.call_args.kwargs['filters']['category_prefixes'], [category])

@@ -10,13 +10,13 @@ from agent.search_intent import extract_search_intent
 from agent.workflow import _retrieve
 from agent.product_evidence import listing_checks
 from rag.phrases import phrase_in_title
-from rag.retrieval import retrieve_products
+from agent.tools.retrieval import retrieve_products
 
 
 class SearchIntentTests(unittest.TestCase):
     def setUp(self):
         for name in ('text_model_version', 'clip_model_version'):
-            version = patch('rag.retrieval.' + name, return_value='test-revision')
+            version = patch('agent.tools.retrieval.' + name, return_value='test-revision')
             version.start()
             self.addCleanup(version.stop)
 
@@ -71,7 +71,7 @@ class SearchIntentTests(unittest.TestCase):
             intent = extract_search_intent('Dresses')
         candidate = {'id': 'dress', 'title': 'Summer Dress', 'text_similarity': .8}
         with patch('agent.workflow.extract_search_intent', return_value=intent), \
-             patch('agent.workflow.retrieve_products', return_value=[candidate]) as retrieve:
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[candidate]) as retrieve:
             result = _retrieve({'plan': Plan(intent='recommend', query='Dresses').model_dump()})
         self.assertEqual(result['result_kind'], 'matches')
         self.assertEqual(result['candidates'], [candidate])
@@ -96,7 +96,7 @@ class SearchIntentTests(unittest.TestCase):
         candidate = {'id': 'cuff', 'title': 'Silver Ear Cuff', 'text_similarity': .8}
         state = {'plan': plan.model_dump()}
         with patch('agent.workflow.extract_search_intent', return_value=intent) as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[candidate]) as retrieve:
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[candidate]) as retrieve:
             first = _retrieve(state)
             second = _retrieve({**state, **first})
         extract.assert_called_once_with('silver ear cuff')
@@ -109,7 +109,7 @@ class SearchIntentTests(unittest.TestCase):
         state = {'plan': Plan(intent='recommend', query='sling bag').model_dump(),
                  'intent_query': 'ear cuff', 'search_intent': SearchIntent(product_phrase='ear cuff').model_dump()}
         with patch('agent.workflow.extract_search_intent', side_effect=ModelError('offline')) as extract, \
-             patch('agent.workflow.retrieve_products') as retrieve:
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products') as retrieve:
             with self.assertRaises(ModelError):
                 _retrieve(state)
         extract.assert_called_once_with('sling bag')
@@ -117,7 +117,7 @@ class SearchIntentTests(unittest.TestCase):
 
     def test_category_browse_and_image_only_skip_intent_extraction(self):
         with patch('agent.workflow.extract_search_intent') as extract, \
-             patch('agent.workflow.retrieve_products', return_value=[]):
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]):
             for selected in ([], ['seed']):
                 _retrieve({'plan': Plan(intent='recommend').model_dump(), 'selected_product_ids': selected})
         extract.assert_not_called()
@@ -139,10 +139,10 @@ class SearchIntentTests(unittest.TestCase):
         connection.execute.return_value.fetchall.return_value = [
             ('wrong', 'Silver Bracelet', 'ear cuff', None, 'Apparel & Accessories', None, .99),
             ('correct', 'Silver Ear Cuffs', '', None, 'Apparel & Accessories', None, .6)]
-        with patch('rag.retrieval.psycopg.connect') as connect, patch('rag.retrieval.register_vector'), \
-             patch('rag.retrieval._search_bm25', return_value=[]) as bm25, \
-             patch('rag.retrieval.embed_texts', return_value=[[1., 0.]]), \
-             patch('rag.retrieval.clip_text_embedding', return_value=[1., 0.]):
+        with patch('agent.tools.retrieval.psycopg.connect') as connect, patch('agent.tools.retrieval.register_vector'), \
+             patch('agent.tools.retrieval._search_bm25', return_value=[]) as bm25, \
+             patch('agent.tools.retrieval.embed_texts', return_value=[[1., 0.]]), \
+             patch('agent.tools.retrieval.clip_text_embedding', return_value=[1., 0.]):
             connect.return_value.__enter__.return_value = connection
             result = retrieve_products(query_context='silver ear cuff', product_phrase='ear cuff',
                                        search_terms=['silver earcuff'], limit=1)
@@ -158,7 +158,7 @@ class SearchIntentTests(unittest.TestCase):
         intent = SearchIntent(product_phrase='bow tie', search_terms=['blue tie'])
         product = {'id': 'tie', 'title': 'Blue Tie', 'text_similarity': .99, 'image_similarity': .99}
         with patch('agent.workflow.extract_search_intent', return_value=intent), \
-             patch('agent.workflow.retrieve_products', return_value=[product]):
+             patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[product]):
             result = _retrieve({'plan': plan.model_dump()})
         self.assertEqual(result['result_kind'], 'none')
         self.assertEqual(result['candidates'], [])

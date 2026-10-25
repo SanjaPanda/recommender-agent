@@ -22,15 +22,14 @@ from .a2ui import product_gallery_operations
 from .config import settings
 from .models import CategoryPrefixes
 from rag import APPAREL_CATEGORY
-from .workflow import SessionBusyError, build_recommendation_agent, run_recommendation_turn, sanitize_apparel_products
-from .product_evidence import listing_checks, source_listing, refresh_product_facts
+from .sessions import SessionBusyError, run_recommendation_turn, sanitize_apparel_products
+from .product_evidence import listing_checks, load_products, refresh_product_facts
 
 ROOT = settings.model_config["env_file"].parent
 app = FastAPI(title="Product Recommender Agent", version="0.1.0")
 logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
                    allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
-agent = build_recommendation_agent()
 
 
 class DiscoverRequest(BaseModel):
@@ -90,20 +89,10 @@ def _serialize_products(items: list[dict[str, Any]], query: str = "", filters: d
                         product_phrase: str | None = None) -> list[dict[str, Any]]:
     """Serialize current apparel facts and source details in one database batch."""
     products = []
-    listings = {}
+    facts, listings = {}, {}
     if items:
         with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
-            rows = connection.execute(
-                "SELECT id,description,features,raw_source,attributes->'attributes',title,brand,"
-                "raw_source->>'ground_truth_category',image,source_record_sha256,image_sha256 "
-                "FROM products WHERE id=ANY(%s) AND (raw_source->>'ground_truth_category'=%s "
-                "OR starts_with(raw_source->>'ground_truth_category',%s))",
-                ([item["id"] for item in items], APPAREL_CATEGORY, APPAREL_CATEGORY + ' > '),
-            ).fetchall()
-        listings = {row[0]: source_listing(row[3] or {}, row[1], row[2] or [], row[4] or {}) for row in rows}
-        facts = {row[0]: dict(zip(('title', 'brand', 'category', 'image_meta',
-                                  'source_record_sha256', 'image_sha256'), row[5:]))
-                 | {'description': row[1], 'features': row[2] or []} for row in rows}
+            facts, listings = load_products(connection, [item['id'] for item in items])
     for item in items:
         if item['id'] not in listings:
             continue
@@ -124,7 +113,8 @@ def _response(
 ) -> dict[str, Any]:
     """Build the JSON response and A2UI operations for one agent turn."""
     intent = state.get("search_intent")
-    products = _serialize_products(state.get("recommendations", []), state.get("query_context", ""),
+    query = state.get("plan", {}).get("query", state.get("query_context", ""))
+    products = _serialize_products(state.get("recommendations", []), query,
                                   state.get("plan", {}).get("filters", {}),
                                   intent.get("product_phrase", "") if intent is not None else None)
     surface_id = f"product-recommendations-{thread_id}"
@@ -133,7 +123,7 @@ def _response(
     return {
         "thread_id": thread_id,
         "a2ui_surface_id": surface_id,
-        "query_context": state.get("query_context", ""),
+        "query_context": query,
         "search_intent": intent,
         "selected_product_ids": state.get("selected_product_ids", []),
         "removed_filters": state.get("removed_filters", []),
@@ -151,6 +141,36 @@ def _response(
     }
 
 
+def _search_response(thread_id: str, turn: dict[str, Any], heading: str,
+                     *, create_surface: bool) -> dict[str, Any]:
+    """Run discovery/refinement with their shared HTTP error contract.
+
+    Args:
+        thread_id: Persistent shopping session identifier.
+        turn: Initial query/categories or validated refinement/example fields.
+        heading: Default gallery heading, overridden for closest alternatives.
+        create_surface: Whether A2UI must replace/create the current surface.
+
+    Returns:
+        Serialized product facts, session context and A2UI operations.
+
+    Raises:
+        HTTPException: 409 for overlap/stale state; 503 for database, model or
+            search validation failures. Explicit cart requests keep their
+            separate 400 invalid-action contract.
+    """
+    try:
+        state = run_recommendation_turn(thread_id=thread_id, turn=turn)
+        return _response(state, thread_id, heading, create_surface=create_surface)
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except psycopg.Error as exc:
+        logger.exception("Database operation failed during recommendation")
+        raise HTTPException(status_code=503, detail="Catalogue database is unavailable. Start PostgreSQL and retry.") from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     """Return a small liveness response for the local API."""
@@ -161,16 +181,8 @@ def health() -> dict[str, str]:
 def discover(request: DiscoverRequest) -> dict[str, Any]:
     """Start or continue a recommendation thread from a free-text request."""
     thread_id = request.thread_id or str(uuid4())
-    try:
-        state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query, "category_prefixes": request.category_prefixes})
-        return _response(state, thread_id, "Choose products you like", create_surface=True)
-    except SessionBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except psycopg.Error as exc:
-        logger.exception("Database operation failed during discovery")
-        raise HTTPException(status_code=503, detail="Catalogue database is unavailable. Start PostgreSQL and retry.") from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _search_response(thread_id, {"query": request.query,
+        "category_prefixes": request.category_prefixes}, "Choose products you like", create_surface=True)
 
 
 @app.post("/api/session")
@@ -182,10 +194,10 @@ def session(request: SessionRequest) -> dict[str, Any]:
             saved = connection.execute("SELECT state FROM agent_sessions WHERE thread_id=%s", (thread_id,)).fetchone()
             state = sanitize_apparel_products(connection, saved[0]) if saved else None
         if state is not None:
-            from rag.retrieval import list_categories
+            from agent.tools.retrieval import list_categories
             state = {**state, "categories": list_categories()}
         else:
-            state = run_recommendation_turn(agent, thread_id=thread_id, turn={})
+            state = run_recommendation_turn(thread_id=thread_id, turn={})
         return _response(state, thread_id, "Recommended for you", create_surface=True)
     except SessionBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -197,7 +209,7 @@ def session(request: SessionRequest) -> dict[str, Any]:
 def cart(request: CartRequest) -> dict[str, Any]:
     """Persist a cart action and remove cart items from displayed recommendations."""
     try:
-        state = run_recommendation_turn(agent, thread_id=request.thread_id,
+        state = run_recommendation_turn(thread_id=request.thread_id,
             turn={"action": request.action, "product_ids": request.product_ids})
         return _response(state, request.thread_id, "Recommended for you", create_surface=True)
     except SessionBusyError as exc:
@@ -220,15 +232,7 @@ def recommend(request: RecommendRequest) -> dict[str, Any]:
         turn["selected_product_ids"] = request.selected_product_ids
     if request.refinement.strip():
         turn["refinement"] = request.refinement.strip()
-    try:
-        state = run_recommendation_turn(agent, thread_id=request.thread_id, turn=turn)
-        return _response(state, request.thread_id, "Recommended for you", create_surface=False)
-    except SessionBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except psycopg.Error as exc:
-        raise HTTPException(status_code=503, detail="Catalogue database is unavailable. Start PostgreSQL and retry.") from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _search_response(request.thread_id, turn, "Recommended for you", create_surface=False)
 
 
 @app.get("/api/products/{product_id}/image")

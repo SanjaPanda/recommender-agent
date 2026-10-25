@@ -18,7 +18,7 @@ class DatabaseContractTests(unittest.TestCase):
     """Validate actual database constraints without leaving catalog fixtures behind."""
 
     def test_cart_ids_are_excluded_from_browsing_before_limit(self):
-        from rag.retrieval import retrieve_products
+        from agent.tools.retrieval import retrieve_products
         baseline = retrieve_products(limit=3)
         if not baseline:
             self.skipTest('Read-only browsing check requires catalog records.')

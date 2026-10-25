@@ -4,8 +4,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from agent.models import Filters, Plan, RouterDecision, RouterRequest, SearchIntent
-from agent.workflow import build_recommendation_agent, sanitize_apparel_products, _retrieve
-from rag.retrieval import retrieve_products
+from agent.workflow import run_turn, _retrieve
+from agent.sessions import sanitize_apparel_products
+from agent.tools.retrieval import retrieve_products
 
 
 class CartTests(unittest.TestCase):
@@ -14,14 +15,14 @@ class CartTests(unittest.TestCase):
                  'recommendations': [{'id': 'a', 'title': 'Dress'}, {'id': 'b', 'title': 'Other Dress'}],
                  'selected_product_ids': ['a'], 'messages': [{'role': 'user', 'content': 'dress'}]}
         before = deepcopy(state)
-        graph = build_recommendation_agent()
-        with patch('agent.workflow.complete') as model, patch('agent.workflow.retrieve_products') as retrieve, \
+        execute = run_turn
+        with patch('agent.workflow.complete') as model, patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products') as retrieve, \
              patch('agent.workflow.list_categories') as categories:
-            added = graph.invoke({**state, 'turn': {'action': 'cart_add', 'product_ids': ['a']}})
+            added = execute({**state, 'turn': {'action': 'cart_add', 'product_ids': ['a']}})
             self.assertEqual([p['id'] for p in added['cart']], ['a'])
             self.assertEqual([p['id'] for p in added['recommendations']], ['b'])
             self.assertEqual(added['selected_product_ids'], [])
-            removed = graph.invoke({**added, 'turn': {'action': 'cart_remove', 'product_ids': ['a']}})
+            removed = execute({**added, 'turn': {'action': 'cart_remove', 'product_ids': ['a']}})
             self.assertEqual(removed['cart'], [])
             self.assertEqual(removed['recommendations'], added['recommendations'])
             self.assertEqual(removed['plan'], before['plan'])
@@ -35,7 +36,7 @@ class CartTests(unittest.TestCase):
         state = {'cart': [], 'recommendations': [{'id': 'a'}]}
         before = deepcopy(state)
         with self.assertRaises(ValueError):
-            build_recommendation_agent().invoke({**state, 'turn': {
+            run_turn({**state, 'turn': {
                 'action': 'cart_add', 'product_ids': ['a', 'invented']}})
         self.assertEqual(state, before)
 
@@ -67,7 +68,7 @@ class CartTests(unittest.TestCase):
         plan = Plan(intent='recommend', query='blue dress', filters=Filters(title_color='blue'))
         state = {'plan': plan.model_dump(), 'cart': [{'id': 'a'}], 'intent_query': 'blue dress',
                  'search_intent': SearchIntent(product_phrase='dress').model_dump()}
-        with patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
+        with patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products', return_value=[]) as retrieve:
             _retrieve(state)
             self.assertEqual(retrieve.call_count, 2)
             for call in retrieve.call_args_list:
@@ -78,14 +79,14 @@ class CartTests(unittest.TestCase):
     def test_browse_and_every_ranking_mode_exclude_cart_before_limits(self):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = []
-        with patch('rag.retrieval.psycopg.connect') as connect, patch('rag.retrieval.register_vector'), \
-             patch('rag.retrieval.text_model_version', return_value='revision'), \
-             patch('rag.retrieval.clip_model_version', return_value='revision'), \
-             patch('rag.retrieval.embed_texts', return_value=[[1., 0.]]), \
-             patch('rag.retrieval.clip_text_embedding', return_value=[1., 0.]), \
-             patch('rag.retrieval._selected_example_vector', return_value=([1., 0.], 'revision', ['Dress'])), \
-             patch('rag.retrieval._search_bm25', return_value=[]) as bm25, \
-             patch('rag.retrieval._search_embedding', return_value=[]) as vectors:
+        with patch('agent.tools.retrieval.psycopg.connect') as connect, patch('agent.tools.retrieval.register_vector'), \
+             patch('agent.tools.retrieval.text_model_version', return_value='revision'), \
+             patch('agent.tools.retrieval.clip_model_version', return_value='revision'), \
+             patch('agent.tools.retrieval.embed_texts', return_value=[[1., 0.]]), \
+             patch('agent.tools.retrieval.clip_text_embedding', return_value=[1., 0.]), \
+             patch('agent.tools.retrieval._selected_example_vector', return_value=([1., 0.], 'revision', ['Dress'])), \
+             patch('agent.tools.retrieval._search_bm25', return_value=[]) as bm25, \
+             patch('agent.tools.retrieval._search_embedding', return_value=[]) as vectors:
             connect.return_value.__enter__.return_value = connection
             retrieve_products(excluded_product_ids=['cart'], limit=1)
             sql, params = connection.execute.call_args.args

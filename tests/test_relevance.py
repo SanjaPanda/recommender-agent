@@ -92,7 +92,7 @@ class RelevanceTests(unittest.TestCase):
             intent="recommend", query="pink bow tie",
             filters=Filters(category_prefixes=[subcategory]),
         )
-        with patch("agent.workflow.retrieve_products", return_value=candidates) as retrieve:
+        with patch("agent.workflow.prepare_query", return_value=None), patch("agent.workflow.retrieve_products", return_value=candidates) as retrieve:
             result = _retrieve({"plan": plan.model_dump(), "selected_product_ids": []})
 
         self.assertEqual(result["result_kind"], "fallback")
@@ -112,7 +112,7 @@ class RelevanceTests(unittest.TestCase):
                 "text_similarity": 0.67, "image_similarity": 0.262,
             },
         ]
-        with patch("agent.workflow.retrieve_products", return_value=candidates):
+        with patch("agent.workflow.prepare_query", return_value=None), patch("agent.workflow.retrieve_products", return_value=candidates):
             result = _retrieve({"plan": plan.model_dump(), "selected_product_ids": []})
 
         self.assertEqual(result["result_kind"], "matches")

@@ -9,8 +9,9 @@ from pydantic import ValidationError
 
 from agent.models import Filters, Plan, RouterDecision
 from agent.conditions import requests_condition, UNSUPPORTED_CONDITION
-from agent.workflow import build_recommendation_agent, sanitize_apparel_products, _retrieve
-from rag.retrieval import retrieve_products
+from agent.workflow import run_turn, _retrieve
+from agent.sessions import sanitize_apparel_products
+from agent.tools.retrieval import retrieve_products
 
 
 class ConditionTests(unittest.TestCase):
@@ -43,8 +44,8 @@ class ConditionTests(unittest.TestCase):
         for field in ('query', 'refinement'):
             with self.subTest(field=field), patch('agent.workflow.complete') as model, \
                  patch('agent.workflow.extract_search_intent') as extract, \
-                 patch('agent.workflow.retrieve_products') as retrieve:
-                result = build_recommendation_agent().invoke({**previous, 'turn': {field: 'only new dresses'}})
+                 patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products') as retrieve:
+                result = run_turn({**previous, 'turn': {field: 'only new dresses'}})
                 self.assertEqual(result['status'], 'clarify')
                 self.assertEqual(result['message'], UNSUPPORTED_CONDITION)
                 for key in previous:
@@ -55,8 +56,8 @@ class ConditionTests(unittest.TestCase):
 
     def test_initial_condition_request_and_saved_preference_do_not_search(self):
         with patch('agent.workflow.list_categories', return_value=[]), \
-             patch('agent.workflow.complete') as model, patch('agent.workflow.retrieve_products') as retrieve:
-            result = build_recommendation_agent().invoke({'turn': {'query': 'used shoes'}})
+             patch('agent.workflow.complete') as model, patch('agent.workflow.prepare_query', return_value=None), patch('agent.workflow.retrieve_products') as retrieve:
+            result = run_turn({'turn': {'query': 'used shoes'}})
             self.assertEqual(result['message'], UNSUPPORTED_CONDITION)
             plan = Plan(intent='recommend', query='shoes', preferences=[{'requirement': 'only new'}])
             result = _retrieve({'plan': plan.model_dump(), 'selected_product_ids': ['seed']})
@@ -66,7 +67,7 @@ class ConditionTests(unittest.TestCase):
             retrieve.assert_not_called()
 
     def test_direct_retrieval_rejects_conditions_before_encoders_or_database(self):
-        with patch('rag.retrieval.embed_texts') as encode, patch('rag.retrieval.psycopg.connect') as connect:
+        with patch('agent.tools.retrieval.embed_texts') as encode, patch('agent.tools.retrieval.psycopg.connect') as connect:
             with self.assertRaisesRegex(ValueError, 'Condition filtering is not supported'):
                 retrieve_products(query_context='used shoes')
             encode.assert_not_called()
@@ -84,8 +85,8 @@ class ConditionTests(unittest.TestCase):
                 before = deepcopy(original)
                 connection = MagicMock()
                 connection.execute.return_value.fetchall.return_value = [
-                    ('dress', 'Current title', 'Description', 'Brand', 'Apparel & Accessories',
-                     None, [], 'source', 'image')]
+                    ('dress', 'Description', [], {}, {}, 'Current title', 'Brand',
+                     'Apparel & Accessories', None, 'source', 'image')]
                 result = sanitize_apparel_products(connection, original)
                 Plan.model_validate(result['plan'])
                 self.assertNotIn('is_secondhand', result['plan']['filters'])
@@ -108,14 +109,14 @@ class ConditionTests(unittest.TestCase):
         saved = {'plan': {'intent': 'recommend', 'filters': {'is_secondhand': False}},
                   'messages': [{'role': 'user', 'content': 'new clothes'}]}
         with patch('agent.api.psycopg.connect') as connect, \
-             patch('rag.retrieval.list_categories', return_value=[]):
+             patch('agent.tools.retrieval.list_categories', return_value=[]):
             connect.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = (saved,)
             response = session(SessionRequest(thread_id='saved'))
         self.assertEqual(response['status'], 'clarify')
         self.assertEqual(response['message'], UNSUPPORTED_CONDITION)
         self.assertNotIn('is_secondhand', response['filters'])
         with patch('agent.workflow.list_categories', return_value=[]), patch('agent.workflow.complete') as model:
-            state = build_recommendation_agent().invoke({
+            state = run_turn({
                 'plan': {**saved['plan'], 'filters': {}}, 'turn': {'action': 'cart_show'}})
         self.assertEqual(state['cart'], [])
         model.assert_not_called()

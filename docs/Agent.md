@@ -2,7 +2,7 @@
 
 ## Turn execution
 
-One LangGraph workflow runs three nodes: router, retrieval and response. FastAPI validates user requests, PostgreSQL persists sessions/cart, and the UI receives bounded product cards plus A2UI operations.
+`agent.workflow.run_turn()` directly calls router, retrieval when needed, and response functions. `agent.sessions.run_recommendation_turn()` owns persistence and concurrency guards. FastAPI validates user requests, PostgreSQL persists sessions/cart, and the UI receives bounded product cards plus A2UI operations.
 
 Natural-language searches and refinements make one local Ollama call. The router receives the previous plan, whether the session is new, the latest message, available categories and displayed products. It returns a complete `RouterDecision`: updated query, filters, preferences, result count and grounded search interpretation. It also names cleared filters in `removed_filters`, which the UI displays. The model is instructed to preserve untouched constraints and reconcile replacements; Pydantic validates category scope, removal flags and interpretation evidence before state changes. Ambiguous requests return clarification while preserving the search plan and cards.
 
@@ -27,7 +27,7 @@ The effective query combines the product need with preserved preferences. Natura
 
 Product-phrase grounding accepts regular singular/plural and supported spelling variants, while requiring complete evidence. For example, `dress` can be grounded by `Dresses`; an unrelated or shortened compound cannot. Attributes must be quoted from the request. The interpreted phrase constrains primary titles before retrieval limits; proposed equivalent terms expand BM25 only.
 
-Retrieval combines BM25, Nomic text, query-to-image CLIP and selected-image examples using weighted RRF. Strong matches pass the relevance gate. When none pass, alternatives retain apparel/category/brand/product-phrase constraints; title color/type may relax. The response explains missing matches and may show fewer than five cards. Ranking parameters and evidence rules are specified in [architecture](architecture.md#search-and-ranking).
+The effective query is encoded once per turn; the same revisioned vectors serve primary and optional relaxed-title searches. Retrieval combines BM25, Nomic text, query-to-image CLIP and selected-image examples using weighted RRF. Strong matches pass the relevance gate. When none pass, alternatives retain apparel/category/brand/product-phrase constraints; title color/type may relax. The response explains missing matches and may show fewer than five cards. Ranking parameters and evidence rules are specified in [architecture](architecture.md#search-and-ranking).
 
 Product details expose source descriptions, features, structured details and snapshot ratings. Similarity details separate raw BM25, cosine values and RRF contributions. Match checks report explicit listing evidence as match/mismatch/unknown. Color filtering uses titles; image color and other preferences are not guaranteed.
 
@@ -47,4 +47,6 @@ uv run recommender-agent-chat
 uv run recommender-search "blue cotton dress"
 ```
 
-The API runs at <http://127.0.0.1:8000>; the Docker web UI runs at <http://localhost:3000>. Each completed turn includes a safe node trace with durations, route/status and modality/result counts. It excludes input text, prompts and model reasoning and is not stored in the session snapshot. Follow [setup](SETUP.md) before running these interfaces.
+The API runs at <http://127.0.0.1:8000>; the Docker web UI runs at <http://localhost:3000>. Each completed turn includes a safe stage trace with durations, route/status and modality/result counts. It excludes input text, prompts and model reasoning and is not stored in the session snapshot. Follow [setup](SETUP.md) before running these interfaces.
+
+For the exact call order, source locations, error paths and examples, see the [execution walkthrough](walkthrough.md).

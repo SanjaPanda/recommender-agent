@@ -1,11 +1,10 @@
-"""Run a local interactive recommendation session backed by the LangGraph agent."""
+"""Run a local interactive recommendation session backed by the shopping workflow."""
 from __future__ import annotations
 
 import argparse
-import json
 import uuid
 
-from .workflow import build_recommendation_agent, run_recommendation_turn
+from .sessions import run_recommendation_turn
 
 
 def _show(state: dict) -> None:
@@ -38,16 +37,15 @@ def _show(state: dict) -> None:
 
 
 def main() -> None:
-    """Run the interactive terminal client for a LangGraph recommendation thread."""
+    """Run the interactive terminal client for a persistent recommendation thread."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--thread-id", default=str(uuid.uuid4()))
     parser.add_argument("--category-prefix", action="append", default=[])
     args = parser.parse_args()
 
-    agent = build_recommendation_agent()
     print("Recommender session started. Enter a request, /select N, /refine TEXT, /reset, or /quit.")
     print(f"Session: {args.thread_id}")
-    initial = run_recommendation_turn(agent, thread_id=args.thread_id, turn={})
+    initial = run_recommendation_turn(thread_id=args.thread_id, turn={})
     _show(initial)
     previous_results: list[dict] = initial.get("recommendations", [])
     while True:
@@ -62,7 +60,7 @@ def main() -> None:
             break
         if line.casefold() == "/reset":
             state = run_recommendation_turn(
-                agent, thread_id=args.thread_id,
+                thread_id=args.thread_id,
                 turn={"reset_context": True, "category_prefixes": args.category_prefix},
             )
             previous_results = []
@@ -90,7 +88,7 @@ def main() -> None:
             turn["category_prefixes"] = args.category_prefix
 
         try:
-            state = run_recommendation_turn(agent, thread_id=args.thread_id, turn=turn)
+            state = run_recommendation_turn(thread_id=args.thread_id, turn=turn)
         except (RuntimeError, ValueError) as exc:
             print(f"Unable to retrieve recommendations: {exc}")
             continue

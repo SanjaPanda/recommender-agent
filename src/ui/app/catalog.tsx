@@ -1,28 +1,10 @@
 "use client";
 
 import { createContext, useContext } from "react";
-import { createCatalog, type CatalogDefinitions, type CatalogRenderers } from "../node_modules/@copilotkit/a2ui-renderer/dist/react-renderer/create-catalog.mjs";
-import { z } from "../node_modules/@copilotkit/a2ui-renderer/node_modules/zod";
-import type { Product } from "./a2ui";
-import { similarityPercent } from "./a2ui";
+import { createCatalog, z, ProductSchema, similarityPercent,
+  type CatalogDefinitions, type CatalogRenderers, type Product } from "./a2ui";
 
 const DynamicString = z.union([z.string(), z.object({ path: z.string() })]);
-const ProductSchema = z.object({
-  id: z.string(), title: z.string(), description: z.string().nullable().optional(),
-  brand: z.string().nullable().optional(), category: z.string().nullable().optional(),
-  image_url: z.string().nullable().optional(),
-  bm25_score: z.number().nullable().optional(),
-  rrf_score: z.number().nullable().optional(),
-  rrf_k: z.number().optional(),
-  rrf_contributions: z.array(z.object({ signal: z.string(), rank: z.number(), weight: z.number(), contribution: z.number() })).optional(),
-  text_similarity: z.number().nullable().optional(),
-  image_similarity: z.number().nullable().optional(),
-  example_similarity: z.number().nullable().optional(),
-  match_checks: z.array(z.object({ label: z.string(), status: z.enum(["match", "mismatch", "unknown"]), evidence: z.string() })).optional(),
-  listing: z.object({ description: z.string().nullable().optional(), features: z.array(z.string()),
-    details: z.record(z.string(), z.string()), average_rating: z.number().nullable().optional(),
-    rating_number: z.number().nullable().optional(), store: z.string().nullable().optional() }).optional(),
-});
 
 export const ProductActions = createContext<{
   selected: string[];
