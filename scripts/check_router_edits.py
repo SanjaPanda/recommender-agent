@@ -1,8 +1,6 @@
 """Evaluate labeled live refinements without retrieval or session writes.
 
-Use --list, --case NAME (repeatable), or --all. Defaults to the original case.
-Requires PostgreSQL category metadata and Ollama.
-
+Use --list, --case NAME (repeatable), or --all. Defaults to brand_and_permission.
 Requires PostgreSQL category metadata and Ollama.
 Run ``uv run python scripts/check_router_edits.py --list`` from the repository
 root to list authored cases without running inference.
@@ -12,6 +10,7 @@ import json
 from pathlib import Path
 import time
 from unittest.mock import patch
+from pydantic import ValidationError
 
 from agent.models import Plan
 from agent.config import settings
@@ -41,7 +40,7 @@ def main():
     group.add_argument('--all', action='store_true')
     group.add_argument('--list', action='store_true')
     parser.add_argument('--model', help='Override AGENT_MODEL for this evaluation only')
-    parser.add_argument('--output', type=Path, default=ROOT / '.data/router-evaluation.json')
+    parser.add_argument('--output', type=Path, default=ROOT / '.codex-work/router-evaluation.json')
     args = parser.parse_args()
     if args.model:
         settings.agent_model = args.model
@@ -86,13 +85,23 @@ def main():
 
                 # Observe real responses; no canned model output is supplied.
                 with patch('agent.workflow.complete', side_effect=observe):
-                    state = workflow._route({'plan': previous, 'turn': {'query': case['message']}})
-                result.update(status=state['status'], message=state['message'], actual=shopping(state['plan']), expected=expected)
+                    state = {'plan': previous, **workflow._route({'plan': previous,
+                        'messages': [{'role': 'user', 'content': previous['query']}],
+                        'turn': {'query': case['message']}})}
+                result.update(status=state['status'], message=state['message'], actual=shopping(state['plan']),
+                              expected=expected, removed_filters=state.get('removed_filters', []))
                 result['passed'] = state['status'] == case['expected_status'] and result['actual'] == expected
+                removed = {name for name, value in previous['filters'].items()
+                           if value and not expected['filters'][name]}
+                result['passed'] = result['passed'] and set(result['removed_filters']) == removed
                 if case['expected_status'] == 'clarify':
                     result['passed'] = result['passed'] and state['route'] == 'respond'
             except Exception as exc:
                 result.update(passed=False, error_type=type(exc).__name__, error=str(exc))
+                if isinstance(exc.__cause__, ValidationError):
+                    result['validation_errors'] = [
+                        {key: error[key] for key in ('type', 'loc', 'msg')}
+                        for error in exc.__cause__.errors(include_input=False)]
             result['seconds'] = round(time.monotonic() - started, 2)
             report['results'].append(result)
             print(json.dumps(result), flush=True)

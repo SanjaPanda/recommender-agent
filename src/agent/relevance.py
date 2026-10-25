@@ -2,7 +2,7 @@
 
 The ranker supplies Nomic text, CLIP text-to-image, and optional selected-example
 similarities. This module applies conservative cutoffs plus title/description
-term checks; it does not call an LLM or inspect generated image descriptions.
+term checks over source listing text and retrieval scores.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def is_relevant_product(
     Returns:
         True when the product clears a retrieval cutoff and the available text
         supports the requested color/product terms. Fallback callers may relax
-        query terms while retaining the same SQL category/brand/condition scope.
+        query terms while retaining the same SQL category/brand scope.
     """
     title = product.get("title") or ""
     description = product.get("description") or ""

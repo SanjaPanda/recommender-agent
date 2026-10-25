@@ -77,11 +77,11 @@ def main() -> None:
             except (ValueError, IndexError):
                 print("Choose a result number from the most recent list, such as /select 2.")
                 continue
-            turn = {"selected_product_id": selected_id}
+            turn = {"selected_product_ids": [selected_id]}
         elif line.startswith("/refine "):
             refinement = line.removeprefix("/refine ").strip()
             if not refinement:
-                print("Add a preference after /refine, such as /refine green and battery powered.")
+                print("Add a preference after /refine, such as /refine green and lightweight.")
                 continue
             turn = {"refinement": refinement}
         else:

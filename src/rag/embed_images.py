@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -17,25 +16,9 @@ from pgvector.psycopg import register_vector
 
 from agent.config import ROOT, settings
 from . import CATALOG_WRITE_LOCK
+from .catalog import local_asset
 
 MODEL = settings.image_embedding_model
-DEFAULT_IMAGE_ROOTS = [
-    ROOT / ".data" / "catalog",
-    ROOT / ".data" / "shopify-selected-train",
-    ROOT / ".data" / "shopify-selected-test",
-]
-
-
-def resolve_image(local_path: str, roots: list[Path]) -> Path | None:
-    """Resolve a saved image path against allowed roots, preserving absolute paths."""
-    candidate = Path(local_path)
-    if candidate.is_absolute():
-        return candidate if candidate.is_file() else None
-    for root in roots:
-        resolved = root / candidate
-        if resolved.is_file():
-            return resolved
-    return None
 
 
 def main() -> None:
@@ -44,10 +27,6 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Maximum products to process")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--force", action="store_true", help="Recompute existing image vectors")
-    parser.add_argument(
-        "--image-root", type=Path, action="append", default=None,
-        help="Directory containing image local_path values; can be repeated",
-    )
     parser.add_argument(
         "--ground-truth-category-prefix", action="append", default=[],
         help="Restrict embedding to products in these ground-truth categories",
@@ -59,7 +38,6 @@ def main() -> None:
         parser.error("--batch-size must be between 1 and 16")
 
     database_url = settings.database_url.get_secret_value()
-    roots = [path.resolve() for path in (args.image_root or DEFAULT_IMAGE_ROOTS)]
 
     try:
         import torch
@@ -103,7 +81,7 @@ def main() -> None:
         register_vector(connection)
         rows = connection.execute(
             """
-            SELECT p.id, p.image, p.raw_source
+            SELECT p.id, p.image
             FROM products p
             WHERE p.image IS NOT NULL
             """ + category_clause + existing_clause + " ORDER BY p.id" + limit_clause,
@@ -114,12 +92,13 @@ def main() -> None:
         for offset in range(0, len(rows), args.batch_size):
             batch = rows[offset : offset + args.batch_size]
             valid: list[tuple[str, Any]] = []
-            for product_id, image_meta, raw_source in batch:
+            for product_id, image_meta in batch:
                 image_meta = image_meta or {}
                 local_path = image_meta.get("local_path")
-                if not local_path:
-                    local_path = (raw_source or {}).get("product_image", {}).get("local_path")
-                image_path = resolve_image(local_path, roots) if local_path else None
+                try:
+                    image_path = local_asset(ROOT / ".data" / "catalog", local_path) if isinstance(local_path, str) else None
+                except ValueError:
+                    image_path = None
                 if image_path is None:
                     missing += 1
                     continue

@@ -1,4 +1,4 @@
-"""Behavioral regressions from the repository audit; no model downloads."""
+"""State, provenance, grounding and recovery contracts; no model downloads."""
 from contextlib import contextmanager
 from io import BytesIO
 import json
@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 from pgvector import Vector
 from agent.models import Plan, SearchIntent
-from agent.refinements import color_refinement
 from agent.relevance import is_relevant_product
 from agent.search_intent import extract_search_intent
 from agent.product_evidence import listing_checks
@@ -25,28 +24,15 @@ from psycopg.types.json import Jsonb
 from agent.config import settings
 
 
-class AuditRegressionTests(unittest.TestCase):
-    def test_color_override_and_clear_remove_old_query_and_preference_colors(self):
-        previous = Plan(intent='recommend', query='blue dress', preferences=[
-            {'requirement': 'not black'}, {'requirement': 'soft cotton'}])
-        product = {'id': 'dress', 'title': 'Black Cotton Dress', 'description': 'Soft cotton',
-                   'text_similarity': .9}
-        for followup in ('black', 'any color'):
-            updated = color_refinement(previous, followup)
-            self.assertEqual(updated.query, 'dress')
-            self.assertEqual([p.requirement for p in updated.preferences], ['soft cotton'])
-            self.assertTrue(is_relevant_product(product, updated.query,
-                            required_title_color=updated.filters.title_color, product_phrase='dress'))
-        self.assertEqual(previous.query, 'blue dress')
-
-    def test_color_override_reextracts_saved_interpretation(self):
+class StateIntegrityTests(unittest.TestCase):
+    def test_changed_query_reextracts_saved_interpretation(self):
         from agent.workflow import _retrieve
-        plan = color_refinement(Plan(intent='recommend', query='blue dress'), 'black')
+        plan = Plan(intent='recommend', query='black dress')
         with patch('agent.workflow.extract_search_intent', return_value=SearchIntent(product_phrase='dress')) as extract, \
              patch('agent.workflow.retrieve_products', return_value=[{'id': 'd', 'title': 'Black Dress'}]):
             result = _retrieve({'plan': plan.model_dump(), 'intent_query': 'blue dress',
                                 'search_intent': SearchIntent(product_phrase='dress').model_dump()})
-        extract.assert_called_once_with('dress')
+        extract.assert_called_once_with('black dress')
         self.assertEqual(result['result_kind'], 'matches')
 
     def test_truncated_compounds_and_negated_products_fail_closed(self):
@@ -105,7 +91,7 @@ class AuditRegressionTests(unittest.TestCase):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
             ('dress', 'New Dress', 'New description', 'Brand', 'Apparel & Accessories',
-             {'local_path': 'new.jpg'}, False, ['New feature'], 'new-source', 'new-image')]
+             {'local_path': 'new.jpg'}, ['New feature'], 'new-source', 'new-image')]
         old = {'id': 'dress', 'title': 'Old Dress', 'source_record_sha256': 'old-source',
                'image_sha256': 'old-image', 'text_similarity': .9}
         result = sanitize_apparel_products(connection, {'recommendations': [old], 'cart': [old],
@@ -121,7 +107,7 @@ class AuditRegressionTests(unittest.TestCase):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
             ('dress', 'New description', ['New feature'], {'average_rating': 4.5}, {},
-             'New Dress', 'Brand', 'Apparel & Accessories', {'local_path': 'new.jpg'}, False, 'new', 'new-image')]
+             'New Dress', 'Brand', 'Apparel & Accessories', {'local_path': 'new.jpg'}, 'new', 'new-image')]
         with patch('agent.api.psycopg.connect') as connect, patch('agent.api._find_image_path', return_value=Path('new.jpg')) as image:
             connect.return_value.__enter__.return_value = connection
             products = _serialize_products([{'id': 'dress', 'title': 'Old Dress',
@@ -271,14 +257,14 @@ class SessionConcurrencyDatabaseTests(unittest.TestCase):
                     (identifier, 'Authored Dress', Jsonb({'ground_truth_category': 'Apparel & Accessories'}),
                      'authored-test', 'a'*64, 'b'*64))
                 card = {'id': identifier, 'title': 'Authored Dress', 'text_similarity': .9}
-                stamped = sanitize_apparel_products(connection, {'recommendations': [card], 'cart': [card]},
+                stamped = sanitize_apparel_products(connection, {'recommendations': [card], 'cart': []},
                                                      invalidate_changed=False)
                 self.assertEqual(stamped['recommendations'][0]['image_sha256'], 'b'*64)
                 unchanged = sanitize_apparel_products(connection, stamped)
                 self.assertEqual(unchanged['recommendations'][0]['text_similarity'], .9)
                 connection.execute('UPDATE products SET title=%s,source_record_sha256=%s WHERE id=%s',
                                    ('Changed Dress', 'c'*64, identifier))
-                refreshed = sanitize_apparel_products(connection, stamped)
+                refreshed = sanitize_apparel_products(connection, {**stamped, 'cart': [stamped['recommendations'][0]]})
                 self.assertEqual(refreshed['recommendations'], [])
                 self.assertEqual(refreshed['cart'][0]['title'], 'Changed Dress')
                 self.assertIsNone(refreshed['cart'][0]['text_similarity'])

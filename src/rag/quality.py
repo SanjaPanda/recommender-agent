@@ -1,4 +1,4 @@
-"""Evidence-oriented curation checks and local pilot quality reporting.
+"""Evidence-oriented curation checks and local catalog quality reporting.
 
 Run ``uv run python -m rag.quality .data/catalog/manifest.json``. This command
 reads local records and writes a review report; it never changes the database.

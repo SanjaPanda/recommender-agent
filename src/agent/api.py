@@ -20,8 +20,10 @@ from pydantic import BaseModel, Field
 
 from .a2ui import product_gallery_operations
 from .config import settings
+from .models import CategoryPrefixes
+from rag import APPAREL_CATEGORY
 from .workflow import SessionBusyError, build_recommendation_agent, run_recommendation_turn, sanitize_apparel_products
-from .product_evidence import listing_checks, source_listing
+from .product_evidence import listing_checks, source_listing, refresh_product_facts
 
 ROOT = settings.model_config["env_file"].parent
 app = FastAPI(title="Product Recommender Agent", version="0.1.0")
@@ -34,7 +36,8 @@ agent = build_recommendation_agent()
 class DiscoverRequest(BaseModel):
     """Validate a user's initial product-discovery query and optional thread."""
 
-    query: str = Field(min_length=1, max_length=1000, description="Initial apparel search request.")
+    query: str = Field(default="", max_length=1000, description="Apparel search request; optional for explicit category browsing.")
+    category_prefixes: CategoryPrefixes | None = None
     thread_id: str | None = Field(default=None, max_length=128, description="Existing session ID, if continuing a thread.")
 
 
@@ -59,29 +62,18 @@ class CartRequest(BaseModel):
 
 
 def _find_image_path(image_meta: Any) -> Path | None:
-    """Resolve only local sample image paths under known image directories."""
+    """Resolve a safe local image under the active catalog directory."""
     if not isinstance(image_meta, dict):
         return None
     relative = image_meta.get("local_path")
     if not isinstance(relative, str):
         return None
-    candidate_rel = Path(relative)
-    if candidate_rel.is_absolute() or ".." in candidate_rel.parts:
+    from rag.catalog import local_asset
+    try:
+        return local_asset(ROOT / ".data" / "catalog", relative)
+    except ValueError:
         return None
-    roots = [
-        ROOT / ".data" / "catalog",
-        ROOT / ".data" / "shopify-selected-train",
-        ROOT / ".data" / "shopify-selected-test",
-    ]
-    for root in roots:
-        candidate = (root / candidate_rel).resolve()
-        try:
-            candidate.relative_to(root.resolve())
-        except ValueError:
-            continue
-        if candidate.is_file():
-            return candidate
-    return None
+
 
 
 def _product_image_path(product_id: str) -> Path | None:
@@ -90,7 +82,7 @@ def _product_image_path(product_id: str) -> Path | None:
         row = connection.execute("SELECT image FROM products WHERE id = %s AND "
                                  "(raw_source->>'ground_truth_category'=%s OR "
                                  "starts_with(raw_source->>'ground_truth_category',%s))",
-                                 (product_id, 'Apparel & Accessories', 'Apparel & Accessories > ')).fetchone()
+                                 (product_id, APPAREL_CATEGORY, APPAREL_CATEGORY + ' > ')).fetchone()
     return _find_image_path(row[0]) if row else None
 
 
@@ -103,31 +95,25 @@ def _serialize_products(items: list[dict[str, Any]], query: str = "", filters: d
         with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
             rows = connection.execute(
                 "SELECT id,description,features,raw_source,attributes->'attributes',title,brand,"
-                "raw_source->>'ground_truth_category',image,is_secondhand,source_record_sha256,image_sha256 "
+                "raw_source->>'ground_truth_category',image,source_record_sha256,image_sha256 "
                 "FROM products WHERE id=ANY(%s) AND (raw_source->>'ground_truth_category'=%s "
                 "OR starts_with(raw_source->>'ground_truth_category',%s))",
-                ([item["id"] for item in items], 'Apparel & Accessories', 'Apparel & Accessories > '),
+                ([item["id"] for item in items], APPAREL_CATEGORY, APPAREL_CATEGORY + ' > '),
             ).fetchall()
         listings = {row[0]: source_listing(row[3] or {}, row[1], row[2] or [], row[4] or {}) for row in rows}
-        facts = {row[0]: dict(zip(('title', 'brand', 'category', 'image_meta', 'is_secondhand',
+        facts = {row[0]: dict(zip(('title', 'brand', 'category', 'image_meta',
                                   'source_record_sha256', 'image_sha256'), row[5:]))
                  | {'description': row[1], 'features': row[2] or []} for row in rows}
     for item in items:
         if item['id'] not in listings:
             continue
         fresh = facts[item['id']]
-        stale = any(item.get(key) != fresh.get(key)
-                    for key in ('source_record_sha256', 'image_sha256'))
-        item = {**item, **fresh}
-        if stale:
-            for key in ('score', 'rrf_score', 'bm25_score', 'text_similarity', 'image_similarity', 'example_similarity'):
-                item[key] = None
-            item['rrf_contributions'] = []
+        item, _ = refresh_product_facts(item, fresh)
         image_path = _find_image_path(item.get("image_meta"))
         product = {key: value for key, value in item.items() if key != "image_meta"}
         product["title"] = product.get("title") or "Untitled product"
         product["image_url"] = f"http://127.0.0.1:8000/api/products/{item['id']}/image" if image_path else None
-        product["listing"] = listings.get(item["id"], source_listing({}, item.get("description"), [], {}))
+        product["listing"] = listings[item["id"]]
         product["match_checks"] = listing_checks(product["title"], product["listing"]["details"], query, filters or {}, product_phrase)
         products.append(product)
     return products
@@ -150,6 +136,7 @@ def _response(
         "query_context": state.get("query_context", ""),
         "search_intent": intent,
         "selected_product_ids": state.get("selected_product_ids", []),
+        "removed_filters": state.get("removed_filters", []),
         "products": products,
         "status": state.get("status", "ok"),
         "message": state.get("message", ""),
@@ -157,7 +144,6 @@ def _response(
         "cart": state.get("cart", []),
         "preferences": state.get("plan", {}).get("preferences", []),
         "filters": state.get("plan", {}).get("filters", {}),
-        "uncertain_count": len(state.get("uncertain", [])),
         "trace": [event.model_dump() for event in state.get("trace", [])],
         "a2ui_operations": product_gallery_operations(
             products, heading=heading, surface_id=surface_id, create_surface=create_surface
@@ -176,7 +162,7 @@ def discover(request: DiscoverRequest) -> dict[str, Any]:
     """Start or continue a recommendation thread from a free-text request."""
     thread_id = request.thread_id or str(uuid4())
     try:
-        state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query})
+        state = run_recommendation_turn(agent, thread_id=thread_id, turn={"query": request.query, "category_prefixes": request.category_prefixes})
         return _response(state, thread_id, "Choose products you like", create_surface=True)
     except SessionBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -209,7 +195,7 @@ def session(request: SessionRequest) -> dict[str, Any]:
 
 @app.post("/api/cart")
 def cart(request: CartRequest) -> dict[str, Any]:
-    """Persist an explicit add/remove action and preserve displayed cards."""
+    """Persist a cart action and remove cart items from displayed recommendations."""
     try:
         state = run_recommendation_turn(agent, thread_id=request.thread_id,
             turn={"action": request.action, "product_ids": request.product_ids})
@@ -247,7 +233,7 @@ def recommend(request: RecommendRequest) -> dict[str, Any]:
 
 @app.get("/api/products/{product_id}/image")
 def product_image(product_id: str) -> FileResponse:
-    """Serve a product image only when it resolves inside a local sample root."""
+    """Serve a product image only when it resolves inside the local catalog."""
     path = _product_image_path(product_id)
     if not path:
         raise HTTPException(status_code=404, detail="Product image is not available locally.")

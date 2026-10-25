@@ -1,6 +1,6 @@
-"""Acquire a bounded, local Amazon metadata/image pilot without importing it.
+"""Acquire bounded Amazon metadata and local images without importing it.
 
-Run ``uv run python -m rag.download_catalog .data/pilot-plan.json``. The plan
+Run ``uv run python -m rag.download_catalog .data/catalog-plan.json``. The plan
 uses the catalog Manifest contract with empty images and a recorded source-use
 decision. This tool never treats public availability as a license decision.
 """
@@ -22,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from .catalog import Manifest, ROOT, normalize, normalize_metadata
+from .catalog import Manifest, ROOT, normalize, normalize_metadata, attach_image
 
 METADATA_HOSTS = frozenset({"huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.hf.co",
                             "cas-bridge.xethub.hf.co", "us.aws.cdn.hf.co"})
@@ -69,7 +69,7 @@ def open_remote(url: str, hosts: frozenset[str]):
     validate_url(url, hosts)
     opener = build_opener(ProxyHandler({}), SafeRedirects(hosts))
     response = opener.open(Request(url, headers={"Accept-Encoding": "identity",
-                                               "User-Agent": "LocalProductDiscoveryPilot/1.0"}), timeout=15)
+                                               "User-Agent": "LocalApparelCatalog/1.0"}), timeout=15)
     if response.headers.get("Content-Encoding", "identity").lower() not in {"identity", ""}:
         response.close()
         raise ValueError("unexpected_content_encoding")
@@ -140,10 +140,47 @@ def fetch_image(url: str, budget: dict[str, Any], deadline: float) -> tuple[byte
     return content, extension
 
 
-def download_pilot(plan: Manifest, root: Path, *, seed_root: Path | None = None) -> dict[str, Any]:
+def _download_product_image(row: dict[str, Any], product: dict[str, Any], plan: Manifest,
+                            root: Path, report: dict[str, Any], deadline: float,
+                            seen_hashes: set[str]) -> dict[str, Any] | None:
+    """Try ordered image candidates, recording bounded failures and stopping on 429.
+
+    Inputs share the acquisition budget and de-duplication set. Returns a
+    normalized product with a validated local image, or None after all candidates
+    fail. Only files created by the failed attempt are removed.
+    """
+    asin = product['source_product_id']
+    for url in ordered_images(row.get("images")):
+        asset_path = None
+        try:
+            content, extension = fetch_image(url, report, deadline)
+            digest = hashlib.sha256(content).hexdigest()
+            if digest in seen_hashes:
+                raise ValueError("duplicate_image")
+            asset_path = root / "images" / (digest + extension)
+            asset_path.write_bytes(content)
+            asset = {"local_path": "images/" + asset_path.name, "source_url": url}
+            candidate = plan.model_copy(update={"images": {asin: asset}})
+            accepted = attach_image(product, row, candidate, root)
+            seen_hashes.add(digest)
+            return accepted
+        except (ValueError, OSError, URLError) as exc:
+            if asset_path is not None:
+                asset_path.unlink(missing_ok=True)
+            error = "http_" + str(exc.code) if isinstance(exc, HTTPError) else type(exc).__name__
+            if isinstance(exc, ValueError) and re.fullmatch(r"[a-z_]+", str(exc)):
+                error = str(exc)
+            report["image_failures"][error] += 1
+            if isinstance(exc, HTTPError) and exc.code == 429:
+                report["stop_reason"] = "rate_limited"
+                break
+    return None
+
+
+def download_catalog(plan: Manifest, root: Path, *, seed_root: Path | None = None) -> dict[str, Any]:
     """Scan a pinned source and write bounded importer assets, optionally extending a seed.
 
-    Refuses to overwrite an existing pilot. Reports each rejected source line and
+    Refuses to overwrite an existing catalog. Reports each rejected source line and
     original accepted line numbers. No database connection or model is used.
     """
     expected = ("https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/"
@@ -151,10 +188,10 @@ def download_pilot(plan: Manifest, root: Path, *, seed_root: Path | None = None)
     if not re.fullmatch(r"[0-9a-f]{40}", plan.revision) or plan.source_url != expected:
         raise ValueError("Use the exact pinned clothing metadata URL and a 40-character commit")
     if plan.rights_status not in {"permitted", "personal_use"} or plan.images or plan.source_lines:
-        raise ValueError("Pilot requires a permitted or personal-use source decision, empty image/line maps")
+        raise ValueError("Acquisition requires a permitted or personal-use source decision, empty image/line maps")
     root.mkdir(parents=True, exist_ok=True)
     if any((root / name).exists() for name in ("manifest.json", "records.jsonl", "pilot-report.json", "records.partial", "rejections.jsonl", "images")):
-        raise FileExistsError("Existing pilot artifacts found; preserve/review them before preparing another pilot")
+        raise FileExistsError("Existing catalog artifacts found; use the catalog maintenance command to extend them")
     (root / "images").mkdir()
     started = time.monotonic()
     deadline = started + WALL_SECONDS
@@ -255,34 +292,10 @@ def download_pilot(plan: Manifest, root: Path, *, seed_root: Path | None = None)
                     title_key = (" ".join(product["title"].casefold().split()), product["brand"])
                     if title_key in seen_titles:
                         raise ValueError("duplicate_title_brand")
-                    accepted = None
-                    for url in ordered_images(row.get("images")):
-                        asset_path = None
-                        try:
-                            content, extension = fetch_image(url, report, deadline)
-                            digest = hashlib.sha256(content).hexdigest()
-                            if digest in seen_hashes:
-                                raise ValueError("duplicate_image")
-                            asset_path = root / "images" / (digest + extension)
-                            asset_path.write_bytes(content)
-                            asset = {"local_path": "images/" + asset_path.name, "source_url": url}
-                            candidate = plan.model_copy(update={"images": {asin: asset}})
-                            accepted = normalize(row, candidate, root)
-                            images[asin] = asset
-                            seen_hashes.add(digest)
-                            break
-                        except (ValueError, OSError, URLError) as exc:
-                            if asset_path is not None:
-                                asset_path.unlink(missing_ok=True)
-                            error = "http_" + str(exc.code) if isinstance(exc, HTTPError) else type(exc).__name__
-                            if isinstance(exc, ValueError) and re.fullmatch(r"[a-z_]+", str(exc)):
-                                error = str(exc)
-                            report["image_failures"][error] += 1
-                            if isinstance(exc, HTTPError) and exc.code == 429:
-                                report["stop_reason"] = "rate_limited"
-                                break
+                    accepted = _download_product_image(row, product, plan, root, report, deadline, seen_hashes)
                     if accepted is None:
                         raise ValueError("no_valid_image")
+                    images[asin] = {key: accepted['image'].obj[key] for key in ('local_path', 'source_url')}
                     seen_ids.add(asin)
                     seen_titles.add(title_key)
                     records.write(line)
@@ -322,14 +335,14 @@ def download_pilot(plan: Manifest, root: Path, *, seed_root: Path | None = None)
 
 
 def main() -> None:
-    """Read a local source-use plan and write a bounded pilot under .data/catalog."""
+    """Read a local source-use plan and write a bounded catalog under .data/catalog."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path, help="Manifest-shaped plan with approved source evidence and empty images")
     args = parser.parse_args()
     if args.plan.stat().st_size > 2_000_000:
         parser.error("Plan exceeds 2 MB")
     plan = Manifest.model_validate_json(args.plan.read_text(encoding="utf-8"))
-    report = download_pilot(plan, ROOT / ".data" / "catalog")
+    report = download_catalog(plan, ROOT / ".data" / "catalog")
     print(json.dumps({key: value for key, value in report.items() if key != "samples"}, indent=2))
 
 

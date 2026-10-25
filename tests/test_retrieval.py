@@ -24,7 +24,7 @@ class RetrievalTests(unittest.TestCase):
             return MagicMock(fetchall=lambda: [(
                 "shirt-1", "Blue Cotton Shirt", "Cotton shirt", "Example",
                 "Apparel & Accessories > Clothing", {"local_path": "shirt.jpg"},
-                False, 0.9,
+                0.9,
             )])
 
         connection.execute.side_effect = execute
@@ -64,7 +64,7 @@ class RetrievalTests(unittest.TestCase):
             return MagicMock(fetchall=lambda: [(
                 "shirt-1", "Blue Cotton Shirt", "Cotton shirt", "Example",
                 "Apparel & Accessories > Clothing", {"local_path": "shirt.jpg"},
-                False, similarity,
+                similarity,
             )])
 
         connection.execute.side_effect = execute

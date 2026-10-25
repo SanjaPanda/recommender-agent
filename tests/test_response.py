@@ -12,7 +12,7 @@ class ResponseTests(unittest.TestCase):
     def setUp(self):
         self.products = [{'id': 'a', 'title': 'Red shirt'}, {'id': 'b', 'title': 'White shirt'}]
         self.state = {'route': 'retrieve', 'plan': Plan(intent='recommend', preferences=[{'requirement': 'not blue'}]).model_dump(),
-                      'candidates': self.products, 'uncertain': [{'id': 'unverified'}]}
+                      'candidates': self.products}
 
     def test_default_returns_cards_and_preference_notice_without_model_call(self):
         with patch.object(settings, 'agent_generate_summaries', False), \

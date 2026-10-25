@@ -50,7 +50,7 @@ class QualityTests(unittest.TestCase):
         normalized = normalize_metadata(row, quality_policy="evidence-v2")
         self.assertEqual(normalized["description"], row["description"][0])
 
-    def test_evidence_v2_rejects_generic_word_count_while_legacy_is_preserved(self):
+    def test_evidence_v2_rejects_generic_word_count_while_default_policy_is_preserved(self):
         row = product()
         row["description"] = ["A wonderful collection for every day of the year. " * 10]
         normalize_metadata(row)

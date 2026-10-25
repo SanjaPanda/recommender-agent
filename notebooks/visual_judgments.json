@@ -1,0 +1,90 @@
+{
+  "case": "white_sneakers",
+  "annotator": "assistant visual inspection, 2026-10-24",
+  "blinded": false,
+  "selection": "Post-retrieval exploratory review of one complete method grid; not held-out evaluation.",
+  "rubric": "Both predominantly white/off-white upper (small contrasting trim allowed) and low-top silhouette. Missing or ambiguous properties remain null. Candidate title/metadata does not override the photo.",
+  "catalog_sha256": "3af46ecd03dd9e1c1f53f8785459de03fed6534debab364598a52ca2d674d09f",
+  "labels": {
+    "amazon-clothing-personal-pilot:B09BTNLN2N": {
+      "mostly_white": null,
+      "low_top": false,
+      "note": "Black/white/green mid-height shoe; not low-top."
+    },
+    "amazon-clothing-personal-pilot:B0B7MGQXTR": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Orange/leopard upper."
+    },
+    "amazon-clothing-personal-pilot:B078HM2RZ3": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Beige upper."
+    },
+    "amazon-clothing-personal-pilot:B00R54SPV0": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Black upper."
+    },
+    "amazon-clothing-personal-pilot:B084H5K46C": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Pink upper."
+    },
+    "amazon-clothing-personal-pilot:B079P8VGQV": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Black canvas upper with white toe/sole."
+    },
+    "amazon-clothing-personal-pilot:B074GXFV5X": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "Mostly white running shoe with pink accents."
+    },
+    "amazon-clothing-personal-pilot:B07PVKHL2Z": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Grey/taupe upper."
+    },
+    "amazon-clothing-personal-pilot:B098QVZ6MZ": {
+      "mostly_white": false,
+      "low_top": null,
+      "note": "Black slip-on upper."
+    },
+    "amazon-clothing-personal-pilot:B010W3BZAS": {
+      "mostly_white": true,
+      "low_top": false,
+      "note": "White high-top with ankle straps; color fits, low-top fails."
+    },
+    "amazon-clothing-personal-pilot:B01GG0M84I": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "Mostly white low canvas shoe with red trim/stitching."
+    },
+    "amazon-clothing-personal-pilot:B09FGMD2MD": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "White low-top with dark heel trim."
+    },
+    "amazon-clothing-personal-pilot:B009XOZE2S": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "White low-top."
+    },
+    "amazon-clothing-personal-pilot:B00NB28682": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "Off-white low slip-on."
+    },
+    "amazon-clothing-personal-pilot:B08JMF3X9D": {
+      "mostly_white": true,
+      "low_top": true,
+      "note": "White low running shoe."
+    },
+    "amazon-clothing-personal-pilot:B076YQC3ZC": {
+      "mostly_white": false,
+      "low_top": true,
+      "note": "Black upper with white stripe."
+    }
+  }
+}

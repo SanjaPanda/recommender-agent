@@ -23,6 +23,7 @@ def complete(
     data: BaseModel,
     *,
     timeout: float | None = None,
+    validation_context: dict | None = None,
 ) -> ResponseT:
     """Call local Ollama once and validate its JSON against a Pydantic schema.
 
@@ -35,6 +36,7 @@ def complete(
             validation.
         system: System instruction describing the permitted response behavior.
         data: Typed request payload serialized as the user message.
+        validation_context: Prior state supplied only to Pydantic response validation.
         timeout: Optional positive finite timeout in seconds; when omitted,
             selected from the configured router timeout or the 120-second default.
 
@@ -46,7 +48,7 @@ def complete(
             or returned JSON fails schema validation.
     """
     if timeout is None:
-        timeout = settings.agent_router_timeout_seconds if schema.__name__ in {'Plan', 'TurnEdits'} else 120
+        timeout = settings.agent_router_timeout_seconds if schema.__name__ == 'RouterDecision' else 120
     if not math.isfinite(timeout) or timeout <= 0:
         raise ModelError('Model call time budget exhausted.')
     model = settings.agent_model.strip()
@@ -57,8 +59,8 @@ def complete(
     payload = {
         'model': model, 'think': settings.agent_think, 'stream': False, 'format': schema.model_json_schema(),
         'messages': [{'role': 'system', 'content': system}, message],
-        'options': {'temperature': 0, 'num_predict': {'Plan': 640, 'Summary': 256}.get(schema.__name__, 640),
-                    'num_ctx': 4096}, 'keep_alive': 0 if schema.__name__ == 'SearchIntent' else '1m',
+        'options': {'temperature': 0, 'num_predict': {'Summary': 256}.get(schema.__name__, 640),
+                    'num_ctx': 4096}, 'keep_alive': 0 if schema.__name__ in {'SearchIntent', 'RouterDecision'} else '1m',
     }
     # Some small GPUs make partial offload slower than CPU-only inference.
     if settings.agent_num_gpu is not None:
@@ -68,10 +70,10 @@ def complete(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content = json.load(response)['message']['content']
-        return schema.model_validate_json(content)
+        return schema.model_validate_json(content, context=validation_context)
     except ValidationError as exc:
         invalid_fields = ", ".join(
-            ".".join(str(part) for part in error["loc"])
+            ".".join(str(part) for part in error["loc"]) or '<root>'
             for error in exc.errors(include_input=False)
         )
         raise ModelError(

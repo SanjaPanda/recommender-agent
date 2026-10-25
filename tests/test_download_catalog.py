@@ -12,7 +12,7 @@ import psycopg
 
 from agent.config import settings
 from rag.catalog import Manifest, ingest
-from rag.download_catalog import download_pilot, fetch_image, ordered_images, validate_url, IMAGE_HOSTS
+from rag.download_catalog import download_catalog, fetch_image, ordered_images, validate_url, IMAGE_HOSTS
 from test_catalog import fixture
 
 
@@ -43,17 +43,17 @@ class DownloaderTests(unittest.TestCase):
         self.sleep.start()
         self.addCleanup(self.sleep.stop)
 
-    def run_pilot(self, body=None, image_response=None):
+    def run_acquisition(self, body=None, image_response=None):
         body = body if body is not None else (json.dumps(self.row) + "\n").encode()
         with patch("rag.download_catalog.open_remote", side_effect=[Response(body), image_response or Response(self.image, "image/png")]) as remote:
-            report = download_pilot(self.plan, self.output)
+            report = download_catalog(self.plan, self.output)
         return report, remote
 
-    def test_pilot_preserves_source_lines_and_reports_quality(self):
+    def test_acquisition_preserves_source_lines_and_reports_quality(self):
         self.plan = self.plan.model_copy(update={"rights_status": "personal_use"})
         short = {**self.row, "description": []}
         body = (json.dumps(short) + "\n" + json.dumps(self.row) + "\n").encode()
-        report, remote = self.run_pilot(body)
+        report, remote = self.run_acquisition(body)
         manifest = Manifest.model_validate_json((self.output / "manifest.json").read_text())
         self.assertEqual(report["status"], "complete")
         self.assertEqual(report["accepted"], 1)
@@ -65,11 +65,11 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(remote.call_count, 2)
         self.assertEqual((self.output / "records.jsonl").read_bytes(), (json.dumps(self.row) + "\n").encode())
         with self.assertRaises(FileExistsError):
-            download_pilot(self.plan, self.output)
+            download_catalog(self.plan, self.output)
 
     def test_metadata_budget_stops_without_image_requests(self):
         self.plan = self.plan.model_copy(update={"max_bytes": 10})
-        report, remote = self.run_pilot()
+        report, remote = self.run_acquisition()
         self.assertEqual(report["metadata_bytes"], 10)
         self.assertEqual(report["accepted"], 0)
         self.assertEqual(report["stop_reason"], "incomplete_line_or_byte_limit")
@@ -77,7 +77,7 @@ class DownloaderTests(unittest.TestCase):
 
     def test_oversized_record_is_drained_within_budget_and_later_records_are_read(self):
         body = b"x" * 1_000_010 + b"\n" + (json.dumps(self.row) + "\n").encode()
-        report, _ = self.run_pilot(body)
+        report, _ = self.run_acquisition(body)
         self.assertEqual(report["accepted"], 1)
         self.assertEqual(report["rejected"], {"oversized_record": 1})
         self.assertEqual(report["metadata_bytes"], len(body))
@@ -85,13 +85,13 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(manifest.source_lines, {"AUTHORED1": 2})
 
     def test_expansion_reuses_original_records_images_and_source_lines(self):
-        self.run_pilot()
+        self.run_acquisition()
         expanded = self.root / "expanded"
         plan = self.plan.model_copy(update={"max_products": 2})
         # Exhaustion preserves the seed without downloading its image again.
         body = (json.dumps(self.row) + "\n").encode()
         with patch("rag.download_catalog.open_remote", return_value=Response(body)) as remote:
-            report = download_pilot(plan, expanded, seed_root=self.output)
+            report = download_catalog(plan, expanded, seed_root=self.output)
         self.assertEqual(report["accepted"], 1)
         self.assertEqual(report["seeded"], 1)
         self.assertEqual(report["image_requests"], 0)
@@ -104,7 +104,7 @@ class DownloaderTests(unittest.TestCase):
     def test_rate_limit_stops_instead_of_repeated_downloads(self):
         body = (json.dumps(self.row) + "\n").encode() * 2
         with patch("rag.download_catalog.open_remote", side_effect=[Response(body), HTTPError(self.url, 429, "limited", {}, None)]) as remote:
-            report = download_pilot(self.plan, self.output)
+            report = download_catalog(self.plan, self.output)
         self.assertEqual(report["stop_reason"], "rate_limited")
         self.assertEqual(report["image_failures"], {"http_429": 1})
         self.assertEqual(remote.call_count, 2)
@@ -120,7 +120,7 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(budget["image_bytes"], 0)
 
     def test_corrupt_image_is_reported_and_not_kept(self):
-        report, _ = self.run_pilot(image_response=Response(b"not an image", "image/png"))
+        report, _ = self.run_acquisition(image_response=Response(b"not an image", "image/png"))
         self.assertEqual(report["accepted"], 0)
         self.assertEqual(report["rejected"], {"no_valid_image": 1})
         self.assertEqual(list((self.output / "images").iterdir()), [])
@@ -128,7 +128,7 @@ class DownloaderTests(unittest.TestCase):
     def test_unpinned_or_wrong_source_does_not_open_network(self):
         with patch("rag.download_catalog.open_remote") as remote:
             with self.assertRaises(ValueError):
-                download_pilot(self.plan.model_copy(update={"revision": "main"}), self.output)
+                download_catalog(self.plan.model_copy(update={"revision": "main"}), self.output)
             remote.assert_not_called()
         self.assertFalse(self.output.exists())
 
@@ -156,13 +156,13 @@ class DownloaderTests(unittest.TestCase):
     def test_metadata_html_is_reported_as_failure(self):
         with patch("rag.download_catalog.open_remote", return_value=Response(b"login page", "text/html")):
             with self.assertRaisesRegex(ValueError, "metadata_mime"):
-                download_pilot(self.plan, self.output)
+                download_catalog(self.plan, self.output)
         self.assertEqual(json.loads((self.output / "pilot-report.json").read_text())["status"], "failed")
 
     def test_metadata_failure_leaves_failed_report_without_import_manifest(self):
         with patch("rag.download_catalog.open_remote", side_effect=HTTPError(self.plan.source_url, 503, "unavailable", {}, None)):
             with self.assertRaises(HTTPError):
-                download_pilot(self.plan, self.output)
+                download_catalog(self.plan, self.output)
         report = json.loads((self.output / "pilot-report.json").read_text())
         self.assertEqual(report["status"], "failed")
         self.assertEqual(report["http_status"], 503)
@@ -171,7 +171,7 @@ class DownloaderTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("RUN_DATABASE_TESTS") == "1", "Opt-in PostgreSQL integration test")
     def test_downloaded_fixture_import_preserves_original_line(self):
         short = {**self.row, "description": []}
-        self.run_pilot((json.dumps(short) + "\n" + json.dumps(self.row) + "\n").encode())
+        self.run_acquisition((json.dumps(short) + "\n" + json.dumps(self.row) + "\n").encode())
         with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
             try:
                 report = ingest(connection, self.output / "manifest.json")

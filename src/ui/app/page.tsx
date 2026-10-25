@@ -20,12 +20,16 @@ type AgentResponse = {
   categories: { name: string; count: number }[];
   cart: { id: string; title: string }[];
   preferences: { requirement: string; strength: string }[];
-  filters: { brand?: string | null; is_secondhand?: boolean | null; category_prefixes?: string[]; title_color?: string | null; title_product?: string | null };
+  filters: { brand?: string | null; category_prefixes?: string[]; title_color?: string | null; title_product?: string | null };
+  removed_filters?: string[];
   trace: AgentTraceEvent[];
   a2ui_operations: A2UIMessage[];
 };
 
 const EXAMPLE_SEARCHES = ["Blue clothes", "Black cotton dress", "Pink bow tie"];
+const FILTER_LABELS: Record<string, string> = {
+  brand: "Brand", category_prefixes: "Category", title_color: "Color", title_product: "Product type",
+};
 
 function RecommendationApp() {
   const [query, setQuery] = useState("");
@@ -101,10 +105,10 @@ function RecommendationApp() {
           {session.search_intent.search_terms.length > 0 && <p><span>Search terms:</span> {session.search_intent.search_terms.join(" · ")}</p>}
           <p>These describe your request. Product checks below use listing evidence.</p>
         </details>}
+        {Boolean(session.removed_filters?.length) && <p><span>Filters removed:</span> {session.removed_filters!.map(name => FILTER_LABELS[name] ?? name).join(", ")}</p>}
         <p><span>Catalog:</span> Apparel &amp; Accessories</p>
         {session.filters?.category_prefixes?.map(c => <p key={c}><span>Category:</span> {c}</p>)}
         {session.filters?.brand && <p><span>Brand:</span> {session.filters.brand}</p>}
-        {session.filters?.is_secondhand != null && <p><span>Condition:</span> {session.filters.is_secondhand ? "Secondhand" : "Brand new"}</p>}
         {!session.search_intent && session.filters?.title_product && <p><span>Product:</span> {session.filters.title_product}</p>}
         {session.filters?.title_color && <p><span>Title color:</span> {session.filters.title_color}</p>}
         {session.preferences?.map(p => <p key={p.requirement}><span>Preference:</span> {p.requirement} ({p.strength})</p>)}

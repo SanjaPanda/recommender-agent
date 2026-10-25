@@ -1,7 +1,12 @@
 """Validated contracts shared by routing, retrieval and responses."""
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from rag import validate_category_prefixes
+
+CategoryPrefixes = Annotated[list[str], Field(max_length=10), AfterValidator(validate_category_prefixes)]
+FilterName = Literal['brand', 'category_prefixes', 'title_color', 'title_product']
 
 
 class Contract(BaseModel):
@@ -28,8 +33,9 @@ class Filters(Contract):
     title_product: str | None = Field(default=None, max_length=100, description="Single product type matched against the main product title.")
     title_color: str | None = Field(default=None, max_length=30, description="Single color word matched against the product title.")
     brand: str | None = Field(default=None, max_length=200, description="Exact catalogue brand filter.")
-    is_secondhand: bool | None = Field(default=None, description="Whether the user requested a pre-owned item.")
-    category_prefixes: list[str] = Field(default_factory=list, max_length=10, description="Apparel taxonomy paths used as inclusive category filters.")
+    category_prefixes: CategoryPrefixes = Field(
+        default_factory=list,
+        description="Inclusive paths within Apparel & Accessories; empty means the full catalog.")
 
 
 class Preference(Contract):
@@ -61,55 +67,86 @@ class SearchIntentRequest(Contract):
 
 class Plan(Contract):
     """Complete updated shopping context, not a concatenation of old turns."""
-    intent: Literal["recommend", "clarify", "categories", "cart_add", "cart_remove", "cart_show"] = Field(description="Action for the current shopping turn.")
+    intent: Literal["recommend", "clarify", "categories"] = Field(description="Action for the current shopping turn.")
     result_limit: int = Field(default=5, ge=1, le=5, description="Maximum number of catalogue products to return.")
     query: str = Field(default="", max_length=1000, description="Current natural-language product need.")
     filters: Filters = Field(default_factory=Filters, description="Supported apparel-only deterministic filters.")
     preferences: list[Preference] = Field(default_factory=list, max_length=10, description="Preferences preserved across turns.")
     message: str = Field(default="", max_length=1000, description="Clarification or user-facing intent message.")
-    product_ids: list[str] = Field(default_factory=list, max_length=20, description="Displayed product IDs for explicit cart actions.")
+
+    @property
+    def effective_query(self) -> str:
+        """Combine the product need and preserved preferences for interpretation/retrieval."""
+        return ' '.join(part for part in [self.query, *(p.requirement for p in self.preferences)] if part)
+
+    @model_validator(mode='after')
+    def validate_preferences(self) -> 'Plan':
+        """Reject duplicate or directly contradictory saved requirements."""
+        requirements = [' '.join(p.requirement.casefold().split()) for p in self.preferences]
+        if len(requirements) != len(set(requirements)):
+            raise ValueError('Preferences must be unique.')
+        for requirement in requirements:
+            for prefix in ('not ', 'no ', 'without '):
+                if requirement.startswith(prefix) and requirement[len(prefix):] in requirements:
+                    raise ValueError('Preferences cannot require and exclude the same attribute.')
+        return self
 
 
-class PlanEdit(Contract):
-    """One explicit change supported by a quote from the latest message."""
-    field: Literal['brand', 'is_secondhand', 'category', 'query', 'preference'] = Field(
-        description='Shopping-plan field changed by this edit.')
-    operation: Literal['add', 'remove', 'replace'] = Field(
-        description='Whether to add, remove, or replace the named constraint.')
-    target: str = Field(default='', max_length=300, description='For preference removal/replacement, copy the existing requirement exactly.')
-    value: str = Field(default='', max_length=1000, description='New value; empty for removal. Condition values: new or used.')
-    evidence: str = Field(min_length=1, max_length=1000, description='Exact supporting quote from the latest user message.')
-    strength: Literal['hard', 'soft'] = 'hard'
-    visual: bool = False
+class RouterDecision(Plan):
+    """Updated shopping state and removal flags returned by one router call."""
+    removed_filters: list[FilterName] = Field(default_factory=list, max_length=4,
+        description='Names of previously active filters explicitly cleared this turn.')
+    search_intent: SearchIntent | None = Field(default=None,
+        description='Grounded interpretation of the effective query plus preferences, for textual recommendations.')
+
+    @model_validator(mode='after')
+    def validate_decision(self, info: ValidationInfo) -> 'RouterDecision':
+        """Check state consistency and interpretation evidence before any state update."""
+        from .search_intent import validate_search_intent
+        from .llm import ModelError
+        previous = (info.context or {}).get('previous_plan')
+        current_filters = self.filters.model_dump()
+        if len(self.removed_filters) != len(set(self.removed_filters)):
+            raise ValueError('Removed filter flags must be unique.')
+        if any(current_filters[name] for name in self.removed_filters):
+            raise ValueError('A removed filter must be empty in the updated state.')
+        if previous is not None:
+            removed = {name for name, value in previous.filters.model_dump().items()
+                       if value and not current_filters[name]}
+            if removed != set(self.removed_filters):
+                raise ValueError('Removed filter flags must match the change from the previous plan.')
+            if self.intent != 'recommend' and any(
+                getattr(self, name) != getattr(previous, name) for name in ('query', 'filters', 'preferences')
+            ):
+                raise ValueError('Clarification and category actions must preserve shopping constraints.')
+        query = self.effective_query
+        if self.intent == 'recommend' and query:
+            if self.search_intent is None:
+                raise ValueError('Textual recommendations require a search interpretation.')
+            try:
+                validate_search_intent(query, self.search_intent)
+            except ModelError as exc:
+                raise ValueError(str(exc)) from exc
+        return self
 
 
-class AddEdit(PlanEdit):
-    """A new constraint always needs a supplied, nonblank value."""
-    operation: Literal['add']
-    value: str = Field(min_length=1, max_length=1000, pattern=r'\S',
-                       description='Required new constraint, for example lightweight. Never empty.')
+class SessionTurn(Contract):
+    """Validated user text or explicit UI/terminal action for one session turn."""
+    query: str = Field(default='', max_length=1000)
+    refinement: str = Field(default='', max_length=1000)
+    category_prefixes: CategoryPrefixes | None = None
+    selected_product_ids: list[str] | None = Field(default=None, max_length=3)
+    action: Literal['cart_add', 'cart_remove', 'cart_show'] | None = None
+    product_ids: list[str] = Field(default_factory=list, max_length=20)
+    reset_context: bool = False
 
-
-class ReplaceEdit(PlanEdit):
-    """Replacing a constraint always supplies its replacement."""
-    operation: Literal['replace']
-    value: str = Field(min_length=1, max_length=1000, pattern=r'\S',
-                       description='Required replacement constraint. Never empty.')
-
-
-class RemoveEdit(PlanEdit):
-    """Removing a constraint cannot introduce a replacement value."""
-    operation: Literal['remove']
-    value: Literal[''] = ''
-
-
-class TurnEdits(Contract):
-    """Routing decision and edits, never a replacement session snapshot."""
-    intent: Literal['recommend', 'clarify', 'categories', 'cart_add', 'cart_remove', 'cart_show'] = Field(
-        description='Action for the current shopping turn.')
-    edits: list[AddEdit | ReplaceEdit | RemoveEdit] = Field(max_length=20, description='Atomic changes supported by direct user-message evidence.')
-    message: str = Field(default='', max_length=1000, description='Clarification text, when needed.')
-    product_ids: list[str] = Field(default_factory=list, max_length=20, description='Displayed IDs for an explicit cart action.')
+    @field_validator('selected_product_ids')
+    @classmethod
+    def unique_examples(cls, value: list[str] | None) -> list[str] | None:
+        """Reject duplicate visual examples before invoking retrieval."""
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError('Select up to three unique products.')
+        return value
 
 
 class Summary(Contract):
@@ -135,10 +172,10 @@ class RouterRequest(Contract):
     """Typed context for interpreting one new user shopping message."""
 
     previous_plan: Plan = Field(description="Previously validated shopping state.")
+    is_new_session: bool = Field(description='Whether this session has no prior user turns.')
     user_message: str = Field(min_length=1, max_length=1000, description='Latest user message to interpret.')
     categories: list[str] = Field(max_length=100, description="Available apparel taxonomy paths.")
     displayed_products: list[ProductReference] = Field(max_length=5, description='Products visible to the user in this session.')
-    cart: list[ProductReference] = Field(max_length=20, description='Current cart tracker contents.')
 
 
 class ExplanationRequest(Contract):

@@ -1,6 +1,8 @@
 # Setup
 
-Requires Python 3.12, uv, Docker Desktop and local Ollama. Run commands from the repository root. Copy `.env.example` to `.env`, set matching database credentials and keep `.env` private.
+Requires Python 3.12, uv, Docker Desktop and local Ollama. Run commands from the repository root unless stated otherwise. Copy `.env.example` to `.env`, set matching database credentials and keep it private.
+
+## Dependencies and database
 
 ```powershell
 uv sync --extra image
@@ -11,19 +13,58 @@ ollama pull gemma3:4b
 ollama pull nomic-embed-text
 ```
 
-Compose exposes PostgreSQL 5432 and the web UI 3000 only on loopback. Its persistent database volume is retained during normal shutdown; avoid `docker compose down -v`. The private catalog is not committed: a fresh checkout requires local acquisition/import and embedding before populated searches work. Existing installations do not need to reacquire or rebuild unchanged compatible data.
+The migration runner initializes a fresh database from `migrations/schema.sql` and safely upgrades existing installations. See [database contracts](database.md#initialize-and-inspect). PostgreSQL 5432 and the UI 3000 are bound to loopback. The database volume persists during normal shutdown.
 
-CLIP runtime uses locally cached `openai/clip-vit-base-patch32`. Populate the cache once if needed:
+CLIP uses cached `openai/clip-vit-base-patch32` weights. Populate the local cache once if needed:
 
 ```powershell
 uv run python -c "from transformers import CLIPModel, CLIPProcessor; name='openai/clip-vit-base-patch32'; CLIPModel.from_pretrained(name); CLIPProcessor.from_pretrained(name)"
 ```
 
-Runtime does not download CLIP weights. Missing query CLIP permits Nomic/BM25 ranking; visual examples require compatible stored image vectors. `EMBEDDING_MODEL` supports explicit Ollama tags; an omitted tag means `:latest`. Updating model weights requires rebuilding the corresponding vectors. See [revision enforcement](database.md#retrieval-and-model-compatibility).
+Runtime does not download CLIP weights. Missing query CLIP allows available Nomic/BM25 modes; visual examples require compatible stored image vectors. `EMBEDDING_MODEL` supports explicit Ollama tags, with `:latest` implied when omitted. Changed encoder weights require rebuilding the corresponding vectors. Keep the installed tag stable while encoding.
 
-## Start and test the UI
+## Catalog preparation
 
-Start the host API in one terminal:
+A fresh checkout needs private metadata, validated images and embeddings before populated searches work. Existing compatible assets need no reacquisition or rebuilding. The catalog is a bounded sequential sample of Amazon Reviews 2023 Apparel & Accessories, with a maximum of 2,000 products.
+
+Prepare a separate source plan such as `.data/catalog-plan.json`. This illustrative template requires actual source identity, an immutable 40-character revision and recorded use evidence; do not replace existing source files with placeholders:
+
+```json
+{
+  "source_id": "amazon-apparel",
+  "source_name": "McAuley-Lab/Amazon-Reviews-2023",
+  "revision": "REPLACE_WITH_PINNED_COMMIT",
+  "source_url": "https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/REPLACE_WITH_PINNED_COMMIT/raw/meta_categories/meta_Clothing_Shoes_and_Jewelry.jsonl",
+  "rights_status": "personal_use",
+  "rights_evidence": "REPLACE_WITH_ACTUAL_SOURCE_USE_DECISION",
+  "records": "records.jsonl",
+  "images": {},
+  "max_products": 2000,
+  "max_lines": 100000,
+  "max_bytes": 250000000,
+  "min_description_words": 50
+}
+```
+
+A recorded personal-use decision is not an upstream license grant. Use the decision and evidence appropriate to your source. Keep datasets, images and reports under ignored `.data/`.
+
+```powershell
+uv run python -m rag.download_catalog .data/catalog-plan.json
+uv run python -m rag.catalog .data/catalog/manifest.json
+uv run python -m rag.embed_text
+uv run python -m rag.embed_images
+uv run python scripts/db/inspect_database.py
+```
+
+Acquisition refuses to overwrite an occupied output directory, validates HTTPS hosts/redirects/public DNS and enforces line, byte, image-attempt and time limits. The acquisition report is stored as `pilot-report.json`; `rejections.jsonl` records individual rejected source lines. Original upstream line numbers and selected image provenance are stored in the generated manifest. These names are persisted asset contracts, not separate workflows.
+
+The importer consumes local files only. It accepts supported apparel branches, requires at least 50 description words and nonempty string-valued details, and preserves feature bullets. Decoded JPEG/PNG/WebP images need at least 224 pixels per side, at most 20 million pixels and at most 10 MB. Image URLs must belong to the source record. Safe paths must stay under `.data/catalog/`. The optional `evidence-v2` manifest policy requires stricter description/detail evidence; unreviewed attribute extraction does not enable hard filters.
+
+Import/embedding commands write products/vectors. Unchanged ready vectors at the same revision are skipped; changed source/image hashes invalidate vectors in the import transaction. Missing source records are not deleted. Embedding `--limit` and `--batch-size` bound work; `--force` rebuilds. BM25 needs no separate persistent index or embedding job. Each module supports `--help`.
+
+## Start the application
+
+Start the host API:
 
 ```powershell
 uv run recommender-agent-api
@@ -36,9 +77,26 @@ docker compose up -d --build web
 docker compose ps
 ```
 
-Open <http://localhost:3000>; read-only API liveness is <http://127.0.0.1:8000/api/health>. Try a product search, a color follow-up, selecting up to three visual examples and explicit cart actions. Expand product details, similarity details and the interpretation/trace panels. Cosine percentages are not match probabilities. Concurrent turns on one session return a retryable HTTP 409; wait for its current request to finish.
+Open <http://localhost:3000>. Read-only API liveness is <http://127.0.0.1:8000/api/health>. Try a text search, a color follow-up, selecting up to three visual examples, explicit cart add/remove actions and session resume. Product details, similarity details and interpretation/trace panels explain listing evidence and ranking signals.
 
-New textual requests can be slow with local CPU inference. Saved interpretations are reused only when the effective query/preferences are unchanged. Color follow-ups remove superseded color clauses from that query and preferences. A catalog change invalidates historical cards/scores; search again to refresh. These checks do not establish material or image truth.
+New textual requests require local inference; identical effective requests reuse saved interpretation. Concurrent turns on one session return HTTP 409. Condition and budget filtering are unsupported; unknown source facts remain unknown. Material/visual preferences guide ranking without guaranteeing facts. Cosine percentages are not probabilities.
+
+Optional terminal and retrieval interfaces:
+
+```powershell
+uv run recommender-agent-chat
+uv run recommender-search "blue cotton dress"
+```
+
+## Catalog maintenance and recovery
+
+```powershell
+uv run python scripts/expand_catalog.py
+```
+
+This command maintains the catalog toward its bounded target using the manifest's existing source identity and policy. It preserves source IDs, source lines and unchanged vectors, stages acquisition under `.data/expansions/<run>/` and backs up metadata under `.data/catalog-backups/`. A complete manifest skips further acquisition unless recovery is pending. Optional `--staged .data/expansions/<run>` publishes an already acquired stage.
+
+Before import, publication prepares replacement files and writes `.data/catalog/.promotion.json` with stage identity and metadata hashes. A maintenance lock spans import/publication. Database commit and file replacement are not atomic. On interruption, preserve the stage, images, journal and backups, then rerun the same command. Recovery verifies hashes, repeats the idempotent import and completes publication before removing the journal. Changed staged metadata is rejected. Resume text/image embedding commands afterward to complete missing compatible vectors.
 
 ## Validation
 
@@ -46,75 +104,32 @@ New textual requests can be slow with local CPU inference. Saved interpretations
 .venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
 
-For opt-in database checks, use the development database commands in [database verification](database.md#verification-and-operational-limits). Some commit temporary authored fixtures and clean them up; they are not read-only checks. For frontend checks, install locked dependencies from `src/ui` with `npm.cmd ci`, then run `npm.cmd exec tsc -- --noEmit --incremental false` and `npm.cmd run build`. Docker's build installs its own locked dependencies.
+For opt-in PostgreSQL checks, see [database verification](database.md#verification). Some tests create and clean authored fixtures; schema tests use a disposable database. They are not read-only checks and do not download data or rebuild application vectors.
 
-Live diagnostics such as `scripts/check_agent_live.py` and `scripts/profile_search_latency.py` require the populated database, compatible encoders and Ollama. They create isolated sessions; the profiler writes `.codex-work/search-latency-profile.json` by default. They are not required for an offline unit run. Past timing observations are under `observations/experiments/`; no new speedup or relevance accuracy follows from passing tests.
-
-## Curated local pilot importer
-
-`rag.catalog` imports prepared Amazon metadata and one selected validated image per product under `.data/catalog/`. It does not acquire data. The manifest records immutable source identity, use decision, original source line mappings and explicit images. This illustrative template requires real values; do not overwrite an existing manifest with placeholders:
-
-```json
-{
-  "source_id": "amazon-clothing-pilot",
-  "source_name": "McAuley-Lab/Amazon-Reviews-2023",
-  "revision": "REPLACE_WITH_PINNED_COMMIT",
-  "source_url": "REPLACE_WITH_EXACT_METADATA_URL",
-  "rights_status": "permitted",
-  "rights_evidence": "REPLACE_WITH_REVIEWED_TERMS_AND_USE_DECISION",
-  "records": "records.jsonl",
-  "images": {
-    "REPLACE_WITH_PARENT_ASIN": {
-      "local_path": "images/selected-image.jpg",
-      "source_url": "REPLACE_WITH_HTTPS_URL_FROM_SOURCE_RECORD"
-    }
-  },
-  "max_products": 50,
-  "max_lines": 100000,
-  "max_bytes": 250000000,
-  "min_description_words": 50
-}
-```
-
-The recorded active source-use decision is personal use; it is not an upstream license grant. Use `personal_use` with the actual recorded evidence when applicable. Normalization accepts only supported apparel branches, requires at least 50 description words and nonempty string-valued details, and preserves every feature bullet. Decoded JPEG/PNG/WebP images must be at least 224 pixels per side, at most 20 million pixels and at most 10 MB; selected URLs must belong to the source row. Traversal and symlink escapes are rejected. Bounds are at most 2,000 products, 100,000 lines and 250 MB metadata, with a 1 MB prepared-record cap.
+From `src/ui`:
 
 ```powershell
-uv run python -m rag.catalog .data/catalog/manifest.json
-uv run python -m rag.embed_text
-uv run python -m rag.embed_images
-uv run python scripts/db/inspect_database.py
+npm.cmd ci
+npm.cmd exec tsc -- --noEmit --incremental false
+npm.cmd run build
 ```
 
-These commands write products/vectors; do not run them merely to inspect an existing installation. Importing absent records does not delete existing products. Changed source/image hashes invalidate vectors; embedding jobs skip unchanged ready vectors for the same revision and commit in batches. Optional `--limit` and `--batch-size` bound embedding work; `--force` rebuilds. Run each module with `--help` for its current interface. BM25 needs no separate embedding or persistent index build.
+Docker builds install their own locked frontend dependencies.
 
-## Bounded downloader and pilot report
+Available diagnostics:
 
-For a new acquisition, prepare a separate manifest-shaped plan with `images: {}`, real source-use evidence and the pinned metadata URL/revision. Then run:
+- `scripts/check_agent_live.py --infrastructure-only`: API/session/cart checks using an isolated test session without model inference. Omitting the option includes the local router.
+- `scripts/check_router_edits.py --list`: list authored edit cases; `--case NAME` evaluates one against the local model.
+- `scripts/check_search_intent.py --case compound`: evaluate authored interpretation evidence without product/vector/session writes. Omit `--case` to evaluate all cases in `data/search_intent_cases.jsonl`.
+- `scripts/profile_search_latency.py`: optional instrumented search diagnostics, requiring local inference and a populated catalog; creates isolated sessions and writes `.codex-work/search-latency-profile.json`.
 
-```powershell
-uv run python -m rag.download_catalog .data/pilot-plan.json
-```
-
-The downloader refuses an occupied output and never connects to PostgreSQL. It validates HTTPS hosts, redirects, public DNS, response/image byte budgets, image decoding and original source line references. `pilot-report.json` records rejection reasons, budgets, stop reason and target deficit. Use the expansion wrapper below for an existing catalog rather than replacing its assets. The optional `evidence-v2` quality policy is not active for the current catalog; unreviewed attribute candidates do not enable hard filters.
-
-## Catalog expansion and recovery
-
-```powershell
-uv run python scripts/expand_catalog.py
-```
-
-Expansion preserves existing source IDs, records and unchanged vectors, stages acquisition under `.data/expansions/<run>/`, and backs up active metadata under `.data/catalog-backups/`. Optional `--staged .data/expansions/<run>` promotes an already acquired run. The target remains 2,000 products; a complete active manifest skips further acquisition unless recovery is pending.
-
-Before importing, promotion prepares replacement files and writes `.data/catalog/.promotion.json` with the stage identity and metadata hashes. It holds the maintenance lock through import and publication. Database commit and multiple file replacements are not atomic. If interrupted, keep the stage, images, journal and backups, and rerun the same command: recovery verifies hashes, repeats the idempotent import and finishes publication before removing the journal. Changed staged metadata is rejected. After recovery/import, run the text/image embedding commands above to complete any missing compatible vectors.
-
-The sample is sequential, not representative. Source metadata/images/reports remain private under ignored `.data/`; customer review bodies are not part of the catalog pipeline. Existing Shopify utilities are retained compatibility interfaces and must not be run as normal setup.
+Authored checks verify specific interpretation/contracts, not general relevance accuracy. No diagnostic runs automatically during setup or unit discovery.
 
 ## Troubleshooting
 
-- Database errors: inspect `docker compose ps`, confirm `.env` credentials and apply pending migrations.
-- Missing vector results after a model update: resume the corresponding embedding command. Runtime excludes incompatible revisions and dimensions.
-- HTTP 409: wait for the session's in-flight turn or reload after a concurrent catalog/session change.
-- Interpretation rejected: the model must preserve compound nouns and account for explicit modifiers with source quotes. Rephrase an ambiguous request; there is no automatic broadening retry.
-- Fewer results: conservative phrase/title boundaries can exclude ambiguous listings. Missing metadata remains unknown; material similarity does not make a material an exact filter.
-
-Earlier pilot counts, scope resets and operational measurements are preserved in [historical setup notes](../observations/archive/2026-10-24-before-audit-fixes/SETUP.md). They are evidence of past runs, not current instructions. The authoritative design is [architecture](architecture.md); request behavior is in [the agent guide](Agent.md).
+- Database errors: inspect `docker compose ps`, confirm `.env` credentials and apply pending schema changes.
+- Missing vector results after an encoder update: resume the corresponding embedding command. Runtime excludes incompatible revisions/dimensions.
+- HTTP 409: wait for the current session turn or reload after a concurrent catalog/session change.
+- Interpretation rejected: preserve compound product names and explicit modifiers; rephrase ambiguity. There is no automatic broadening retry.
+- Fewer results: title/phrase evidence can exclude ambiguous listings. Missing metadata stays unknown.
+- Condition requests: search without a new/used/pre-owned requirement. Unsupported saved constraints are sanitized on resume while preserving cart/history.

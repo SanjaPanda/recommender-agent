@@ -17,6 +17,18 @@ from agent.config import settings
 class DatabaseContractTests(unittest.TestCase):
     """Validate actual database constraints without leaving catalog fixtures behind."""
 
+    def test_cart_ids_are_excluded_from_browsing_before_limit(self):
+        from rag.retrieval import retrieve_products
+        baseline = retrieve_products(limit=3)
+        if not baseline:
+            self.skipTest('Read-only browsing check requires catalog records.')
+        excluded = [baseline[0]['id']]
+        rows = retrieve_products(limit=3, excluded_product_ids=excluded)
+        self.assertNotIn(excluded[0], [row['id'] for row in rows])
+        expected = self.connection.execute('SELECT id FROM products WHERE id <> ALL(%s) ORDER BY id LIMIT 3',
+                                           (excluded,)).fetchall()
+        self.assertEqual([row['id'] for row in rows], [row[0] for row in expected])
+
     def test_catalog_revision_trigger_includes_truncate_and_rolls_back(self):
         definition = self.connection.execute(
             "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname='products_catalog_revision'"

@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from .retrieval import APPAREL_CATEGORY, retrieve_products
+from . import validate_category_prefixes
+from .retrieval import retrieve_products
 
 
 def main() -> None:
@@ -20,7 +21,6 @@ def main() -> None:
     parser.add_argument("--category-prefix", action="append", default=[],
                         help="Optional apparel category path; repeat to include more paths")
     parser.add_argument("--brand", help="Exact catalogue brand filter")
-    parser.add_argument("--secondhand", choices=("true", "false"))
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     if not args.query and not args.reference_product_id:
@@ -31,13 +31,17 @@ def main() -> None:
         parser.error("reference product IDs must be unique")
     if args.limit < 1:
         parser.error("--limit must be at least 1")
-    if any(prefix != APPAREL_CATEGORY and not prefix.startswith(APPAREL_CATEGORY + " > ")
-           for prefix in args.category_prefix):
-        parser.error("category prefixes must be inside Apparel & Accessories")
+    try:
+        validate_category_prefixes(args.category_prefix)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    from agent.conditions import requests_condition, UNSUPPORTED_CONDITION
+    if requests_condition(args.query or ""):
+        parser.error(UNSUPPORTED_CONDITION)
 
     filters = {
         "brand": args.brand,
-        "is_secondhand": None if args.secondhand is None else args.secondhand == "true",
         "category_prefixes": args.category_prefix,
     }
     rows = retrieve_products(

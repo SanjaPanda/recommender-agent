@@ -13,15 +13,15 @@ from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from agent.config import settings
+from . import APPAREL_CATEGORY, validate_category_prefixes
 from .clip_runtime import text_embedding as clip_text_embedding
 from .clip_runtime import model_version as clip_model_version
-from .embed_images import MODEL as IMAGE_MODEL
 from .embed_text import MODEL as TEXT_MODEL, embed_texts, model_digest as text_model_version
 from .bm25 import rank as bm25_rank
 from .product_types import product_type, requested_product_type, sql_pattern
 from .phrases import phrase_in_title, phrase_pattern
 
-APPAREL_CATEGORY = "Apparel & Accessories"
+IMAGE_MODEL = settings.image_embedding_model
 logger = logging.getLogger(__name__)
 _category_cache = OrderedDict()
 _category_cache_lock = Lock()
@@ -36,6 +36,7 @@ def retrieve_products(
     filters: dict[str, Any] | None = None,
     product_phrase: str | None = None,
     search_terms: list[str] | None = None,
+    excluded_product_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rank apparel by product text, CLIP images, and selected examples.
 
@@ -49,9 +50,10 @@ def retrieve_products(
         selected_product_ids: Up to three previously displayed apparel IDs.
         category_prefixes: Optional narrower apparel taxonomy paths.
         limit: Maximum results to return; must be positive.
-        filters: Validated brand, condition, product-title, and category filters.
-        product_phrase: LLM-extracted literal product phrase; empty disables legacy type inference.
+        filters: Validated brand, product-title, and category filters.
+        product_phrase: LLM-extracted literal product phrase; empty disables title-family inference.
         search_terms: LLM-proposed equivalent phrases used for lexical ranking only.
+        excluded_product_ids: Session cart IDs omitted from every mode before limits.
 
     Returns:
         Products in fused ranking order with stable database IDs and per-mode scores.
@@ -63,6 +65,9 @@ def retrieve_products(
     Example:
         >>> retrieve_products(query_context="blue cotton dress", limit=5)
     """
+    from agent.conditions import requests_condition, UNSUPPORTED_CONDITION
+    if requests_condition(query_context):
+        raise ValueError(UNSUPPORTED_CONDITION)
     if limit < 1:
         raise ValueError("limit must be at least 1")
     refs = selected_product_ids or []
@@ -73,9 +78,12 @@ def retrieve_products(
     wanted_type = requested_product_type(query_context, active_filters.get("title_product")) if product_phrase is None else None
     sql_filters = active_filters
     if product_phrase is not None or (wanted_type == "bowtie" and product_type(active_filters.get("title_product") or "") == "tie"):
-        # The interpreted phrase replaces legacy single-word type inference.
+        # The interpreted phrase takes precedence over single-word type inference.
         sql_filters = {**active_filters, "title_product": None}
     category_clause, category_params = filter_clause(sql_filters, category_prefixes or [])
+    if excluded_product_ids:
+        category_clause += " AND p.id <> ALL(%s)"
+        category_params.append(excluded_product_ids)
     if product_phrase:
         category_clause += " AND (regexp_split_to_array(COALESCE(p.title, ''), '\\s+(?:for|with|fits|similar to)\\s+', 'i'))[1] ~* %s"
         # Apply the same conservative segment boundary before candidate limits;
@@ -110,14 +118,14 @@ def retrieve_products(
         if query_vector is None and not refs:
             rows = connection.execute(
                 "SELECT p.id,p.title,p.description,p.brand,"
-                "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image,p.is_secondhand "
+                "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image "
                 "FROM products p WHERE true" + category_clause + " ORDER BY p.id LIMIT %s",
                 (*category_params, limit),
             ).fetchall()
             return [
                 {
                     "id": row[0], "title": row[1], "description": row[2], "brand": row[3],
-                    "category": row[4], "image_meta": row[5], "is_secondhand": row[6],
+                    "category": row[4], "image_meta": row[5],
                     "score": 0.0, "text_similarity": None,
                     "image_similarity": None, "example_similarity": None,
                     "visual_source": "hybrid",
@@ -126,44 +134,15 @@ def retrieve_products(
             ]
 
         if refs:
-            reference_rows = connection.execute(
-                """SELECT e.product_id,e.embedding::real[],p.title,e.model_version
-                   FROM product_embeddings e JOIN products p ON p.id=e.product_id
-                   WHERE e.product_id=ANY(%s) AND e.model_name=%s AND e.modality='image'
-                     AND e.status='ready'
-                     AND (p.raw_source->>'ground_truth_category'=%s OR
-                          starts_with(p.raw_source->>'ground_truth_category',%s))""",
-                (refs, IMAGE_MODEL, APPAREL_CATEGORY, APPAREL_CATEGORY + " > "),
-            ).fetchall()
-            available = {row[0] for row in reference_rows}
-            missing = [product_id for product_id in refs if product_id not in available]
-            if missing:
-                raise ValueError("Selected apparel products have no CLIP image vectors: " + ", ".join(missing))
-            versions = {row[3] for row in reference_rows}
-            if len(versions) != 1 or not next(iter(versions)):
-                raise ValueError('Selected examples use incompatible CLIP revisions. Rebuild their image vectors.')
-            seed_version = next(iter(versions))
-            if image_version is not None and image_version != seed_version:
-                raise ValueError('Selected examples do not match the current CLIP encoder revision. Rebuild image vectors.')
-            image_version = seed_version
-            dimension = len(reference_rows[0][1])
-            if any(len(row[1]) != dimension for row in reference_rows):
-                raise ValueError('Selected examples have incompatible vector dimensions.')
-            mean_vector = [0.0] * dimension
+            example_vector, image_version, titles = _selected_example_vector(connection, refs, image_version)
             if product_phrase is None and not query_context.strip() and not active_filters.get("title_product"):
-                seed_types = {product_type(row[2] or "") for row in reference_rows}
+                seed_types = {product_type(title) for title in titles}
                 if len(seed_types) == 1 and None not in seed_types:
                     wanted_type = next(iter(seed_types))
-            for _, values, _, _ in reference_rows:
-                for index, value in enumerate(values):
-                    mean_vector[index] += float(value) / len(reference_rows)
-            norm = sum(value * value for value in mean_vector) ** 0.5
-            if not norm:
-                raise ValueError("Could not form a similarity vector from selected examples.")
-            example_vector = Vector([value / norm for value in mean_vector])
-            if wanted_type:
-                category_clause += " AND COALESCE(p.title, '') ~* %s"
-                category_params.append(sql_pattern(wanted_type))
+        if wanted_type:
+            category_clause += " AND COALESCE(p.title, '') ~* %s"
+            category_params.append(sql_pattern(wanted_type))
+        if refs:
             example_rows = _search_embedding(
                 connection, vector=example_vector, modality="image", model=IMAGE_MODEL,
                 model_version=image_version,
@@ -172,9 +151,6 @@ def retrieve_products(
             )
 
         if query_vector is not None:
-            if wanted_type and not refs:
-                category_clause += " AND COALESCE(p.title, '') ~* %s"
-                category_params.append(sql_pattern(wanted_type))
             bm25_rows = _search_bm25(
                 connection, query=' '.join([query_context, *(search_terms or [])]), category_clause=category_clause,
                 category_params=category_params, excluded_ids=exclude_refs, limit=candidate_limit,
@@ -193,34 +169,101 @@ def retrieve_products(
                     excluded_ids=exclude_refs, limit=candidate_limit,
                 )
 
-    ranked_lists: list[tuple[list[tuple[Any, ...]], str, str, float]] = []
+    ranked_lists: list[tuple[list[tuple[Any, ...]], str, float]] = []
     if query_vector is not None:
         ranked_lists.extend([
-            (bm25_rows, "keyword", "bm25_score", 0.50),
-            (text_rows, "text", "text_similarity", 0.50),
-            (clip_rows, "image", "image_similarity", 0.50),
+            (bm25_rows, "bm25_score", 0.50),
+            (text_rows, "text_similarity", 0.50),
+            (clip_rows, "image_similarity", 0.50),
         ])
     if example_rows:
-        ranked_lists.append((example_rows, "image", "example_similarity",
+        ranked_lists.append((example_rows, "example_similarity",
                              0.20 if query_vector is not None else 1.0))
-    available_weight = sum(weight for rows, _, _, weight in ranked_lists if rows)
+    return _fuse_rankings(ranked_lists, title_product=active_filters.get("title_product"),
+                          wanted_type=wanted_type, product_phrase=product_phrase, limit=limit)
+
+
+def _selected_example_vector(connection: psycopg.Connection, refs: list[str],
+                             image_version: str | None) -> tuple[Vector, str, list[str]]:
+    """Read eligible CLIP examples and validate revisions/dimensions before averaging.
+
+    Args:
+        connection: Retrieval connection with pgvector registered.
+        refs: One to three unique selected apparel product IDs.
+        image_version: Query CLIP revision, if available, to match against seeds.
+
+    Returns:
+        Normalized mean vector, immutable seed revision and seed titles.
+
+    Raises:
+        ValueError: If examples are missing, incompatible or have a zero mean.
+    """
+    reference_rows = connection.execute(
+        """SELECT e.product_id,e.embedding::real[],p.title,e.model_version
+           FROM product_embeddings e JOIN products p ON p.id=e.product_id
+           WHERE e.product_id=ANY(%s) AND e.model_name=%s AND e.modality='image'
+             AND e.status='ready'
+             AND (p.raw_source->>'ground_truth_category'=%s OR
+                  starts_with(p.raw_source->>'ground_truth_category',%s))""",
+        (refs, IMAGE_MODEL, APPAREL_CATEGORY, APPAREL_CATEGORY + " > "),
+    ).fetchall()
+    available = {row[0] for row in reference_rows}
+    missing = [product_id for product_id in refs if product_id not in available]
+    if missing:
+        raise ValueError("Selected apparel products have no CLIP image vectors: " + ", ".join(missing))
+    versions = {row[3] for row in reference_rows}
+    if len(versions) != 1 or not next(iter(versions)):
+        raise ValueError('Selected examples use incompatible CLIP revisions. Rebuild their image vectors.')
+    seed_version = next(iter(versions))
+    if image_version is not None and image_version != seed_version:
+        raise ValueError('Selected examples do not match the current CLIP encoder revision. Rebuild image vectors.')
+    dimension = len(reference_rows[0][1])
+    if any(len(row[1]) != dimension for row in reference_rows):
+        raise ValueError('Selected examples have incompatible vector dimensions.')
+    mean_vector = [0.0] * dimension
+    for _, values, _, _ in reference_rows:
+        for index, value in enumerate(values):
+            mean_vector[index] += float(value) / len(reference_rows)
+    norm = sum(value * value for value in mean_vector) ** 0.5
+    if not norm:
+        raise ValueError("Could not form a similarity vector from selected examples.")
+    example_vector = Vector([value / norm for value in mean_vector])
+    return example_vector, seed_version, [row[2] or "" for row in reference_rows]
+
+
+def _fuse_rankings(ranked_lists: list[tuple[list[tuple[Any, ...]], str, float]],
+                   *, title_product: str | None, wanted_type: str | None,
+                   product_phrase: str | None, limit: int) -> list[dict[str, Any]]:
+    """Fuse nonempty ranked lists with existing weights and conservative title gates.
+
+    Args:
+        ranked_lists: Candidate rows, score key and base weight per list.
+        title_product: Explicit title filter used for primary-title ordering.
+        wanted_type: Conservative title-family gate, or None for phrase searches.
+        product_phrase: Required interpreted phrase, if present.
+        limit: Maximum number of eligible products to return.
+
+    Returns:
+        Ranked product dictionaries with raw scores and individual RRF contributions.
+    """
+    available_weight = sum(weight for rows, _, weight in ranked_lists if rows)
 
     fused: dict[str, dict[str, Any]] = {}
-    for rows, modality, score_key, raw_weight in ranked_lists:
+    for rows, score_key, raw_weight in ranked_lists:
         if not rows or not available_weight:
             continue
         weight = raw_weight / available_weight
         for rank, row in enumerate(rows, start=1):
-            product_id, title, description, brand, category, image_meta, is_secondhand, similarity = row[:8]
+            product_id, title, description, brand, category, image_meta, similarity = row[:7]
             product = fused.setdefault(product_id, {
                 "id": product_id, "title": title, "description": description, "brand": brand,
-                "category": category, "image_meta": image_meta, "is_secondhand": is_secondhand,
+                "category": category, "image_meta": image_meta,
                 "image_similarity": None, "example_similarity": None,
                 "text_similarity": None, "bm25_score": None, "rrf_score": 0.0,
                 "rrf_k": 60, "rrf_contributions": [], "score": 0.0, "visual_source": "hybrid",
             })
-            if len(row) > 8:
-                product["features"] = row[8]
+            if len(row) > 7:
+                product["features"] = row[7]
             product[score_key] = float(similarity)
             contribution = weight / (60 + rank)
             product["score"] += contribution
@@ -239,12 +282,11 @@ def retrieve_products(
             A descending sort tuple of title-match flag and fused score. When
             no type filter is active, candidates are ordered by score alone.
         """
-        product_type = active_filters.get("title_product")
-        if not product_type:
+        if not title_product:
             return False, item["score"]
         head = re.split(r"\s+(?:for|with|fits)\s+", item.get("title") or "",
                         maxsplit=1, flags=re.IGNORECASE)[0].strip()
-        primary = bool(re.search(r"\b" + re.escape(product_type) + r"(?:s|es)?$", head, re.IGNORECASE))
+        primary = bool(re.search(r"\b" + re.escape(title_product) + r"(?:s|es)?$", head, re.IGNORECASE))
         return primary, item["score"]
 
     eligible = [item for item in fused.values()
@@ -259,11 +301,11 @@ def _search_bm25(connection, *, query, category_clause, category_params, exclude
     params = [*category_params, *([excluded_ids] if excluded_ids else [])]
     rows = connection.execute(
         "SELECT p.id,p.title,p.description,p.brand,"
-        "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image,p.is_secondhand,p.features "
+        "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image,p.features "
         "FROM products p WHERE true" + category_clause + exclusion + " ORDER BY p.id", params,
     ).fetchall()
-    documents = [" ".join([row[1] or "", row[2] or "", *(row[7] or [])]) for row in rows]
-    return [(*rows[index][:7], score, rows[index][7]) for index, score in bm25_rank(query, documents)[:limit]]
+    documents = [" ".join([row[1] or "", row[2] or "", *(row[6] or [])]) for row in rows]
+    return [(*rows[index][:6], score, rows[index][6]) for index, score in bm25_rank(query, documents)[:limit]]
 
 
 def _search_embedding(
@@ -286,7 +328,7 @@ def _search_embedding(
         exclusion_params = [excluded_ids]
     return connection.execute(
         """SELECT p.id,p.title,p.description,p.brand,
-                  COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image,p.is_secondhand,
+                  COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image,
                   1 - (e.embedding <=> %s) AS similarity
            FROM product_embeddings e JOIN products p ON p.id=e.product_id
            WHERE e.model_name=%s AND e.modality=%s AND e.status='ready'
@@ -298,16 +340,12 @@ def _search_embedding(
 
 def filter_clause(filters: dict[str, Any], category_prefixes: list[str]) -> tuple[str, list[Any]]:
     """Compile validated apparel filters to parameterized SQL predicates."""
-    allowed = {"brand", "is_secondhand", "category_prefixes", "title_color", "title_product"}
+    allowed = {"brand", "category_prefixes", "title_color", "title_product"}
     if set(filters) - allowed:
         raise ValueError("Unsupported catalogue filter")
     clauses: list[str] = []
     params: list[Any] = []
-    prefixes = filters.get("category_prefixes") or category_prefixes
-    if any(not isinstance(prefix, str) or
-           (prefix != APPAREL_CATEGORY and not prefix.startswith(APPAREL_CATEGORY + " > "))
-           for prefix in prefixes):
-        raise ValueError("Category filters must stay within Apparel & Accessories.")
+    prefixes = validate_category_prefixes(filters.get("category_prefixes") or category_prefixes)
     clauses.append(
         "((p.raw_source->>'ground_truth_category' = %s) OR "
         "starts_with(p.raw_source->>'ground_truth_category', %s))"
@@ -338,11 +376,6 @@ def filter_clause(filters: dict[str, Any], category_prefixes: list[str]) -> tupl
     if filters.get("brand") is not None:
         clauses.append("lower(p.brand) = lower(%s)")
         params.append(filters["brand"])
-    if filters.get("is_secondhand") is not None:
-        if not isinstance(filters["is_secondhand"], bool):
-            raise ValueError("is_secondhand must be a boolean")
-        clauses.append("p.is_secondhand = %s")
-        params.append(filters["is_secondhand"])
     return " AND " + " AND ".join(clauses), params
 
 

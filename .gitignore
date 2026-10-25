@@ -12,3 +12,4 @@ artifacts/
 src/ui/node_modules/
 src/ui/.next/
 .agents/
+archive/

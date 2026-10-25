@@ -1,0 +1,157 @@
+{
+  "selection_policy": "Cases and seeds fixed after inspecting catalog availability and seed photos, before viewing retrieval rankings. Convenience sample, not a benchmark.",
+  "text_cases": [
+    {
+      "id": "blue_dress",
+      "query": "blue dress",
+      "kind": "visual color and product",
+      "family": "\\bdress(?:es)?\\b",
+      "reject": "\\bdress\\s+(?:shoes?|sandals?|pumps?|shirts?)\\b",
+      "requirements": [
+        "\\bblue\\b"
+      ]
+    },
+    {
+      "id": "pink_bow_tie",
+      "query": "pink bow tie",
+      "kind": "visual color and compound product",
+      "family": "\\bbow[ -]?ti(?:e|es)\\b",
+      "reject": "\\bshirt\\b",
+      "requirements": [
+        "\\bpink\\b"
+      ]
+    },
+    {
+      "id": "black_ankle_boots",
+      "query": "black ankle boots",
+      "kind": "visual shape and color",
+      "family": "\\bboot(?:s|ie|ies)?\\b",
+      "reject": "\\b(?:jeans?|pants?)\\b",
+      "requirements": [
+        "\\bblack\\b",
+        "\\bankle\\b"
+      ]
+    },
+    {
+      "id": "white_sneakers",
+      "query": "white low top sneakers",
+      "kind": "visual shape and color",
+      "family": "\\b(?:sneakers?|tennis shoes|running shoes|walking shoes)\\b",
+      "reject": "",
+      "requirements": [
+        "\\bwhite\\b",
+        "\\blow[ -]?(?:top|cut)\\b"
+      ]
+    },
+    {
+      "id": "waterproof_boots",
+      "query": "waterproof hiking boots",
+      "kind": "functional listing claim",
+      "family": "\\bboots?\\b",
+      "reject": "\\b(?:jeans?|pants?)\\b",
+      "requirements": [
+        "\\bwaterproof\\b",
+        "\\bhik(?:e|es|ing)\\b"
+      ]
+    },
+    {
+      "id": "cotton_shirt",
+      "query": "machine washable cotton shirt",
+      "kind": "material and care listing claims",
+      "family": "\\b(?:t[ -]?shirts?|shirts?|blouses?)\\b",
+      "reject": "",
+      "requirements": [
+        "\\bcotton\\b",
+        "\\bmachine wash(?:able)?\\b"
+      ]
+    },
+    {
+      "id": "silver_clasp",
+      "query": "sterling silver necklace with a lobster clasp",
+      "kind": "material and fastening listing claims",
+      "family": "\\bnecklace\\b",
+      "reject": "",
+      "requirements": [
+        "\\bsterling silver\\b",
+        "\\blobster(?: claw)? clasp\\b"
+      ]
+    },
+    {
+      "id": "brand_earrings",
+      "query": "Ross-Simons pearl earrings",
+      "kind": "brand and exact product terms",
+      "family": "\\bearrings?\\b",
+      "reject": "",
+      "requirements": [
+        "ross[ -]simons",
+        "\\bpearls?\\b"
+      ]
+    },
+    {
+      "id": "warm_neck",
+      "query": "something soft to wrap around my neck on a cold day",
+      "kind": "description paraphrase",
+      "family": "\\b(?:scarves|scarf|neck warmer|neck gaiter)\\b",
+      "reject": "",
+      "requirements": [
+        "\\b(?:soft|warm|fleece|wool)\\b"
+      ]
+    },
+    {
+      "id": "exclude_blue",
+      "query": "dress that is not blue",
+      "kind": "negation stress case",
+      "family": "\\bdress(?:es)?\\b",
+      "reject": "\\bdress\\s+(?:shoes?|sandals?|pumps?|shirts?)\\b",
+      "requirements": [],
+      "note": "Do not treat absence of blue in metadata as proof of exclusion. Inspect photos; no automated exclusion-success score."
+    }
+  ],
+  "seed_groups": [
+    {
+      "id": "rugged_boots",
+      "intent": "Rugged lace-up ankle boots; visual similarity, not a waterproof/material guarantee.",
+      "family": "\\bboots?\\b",
+      "reject": "\\b(?:jeans?|pants?)\\b",
+      "requirements": [],
+      "seeds": [
+        {
+          "id": "amazon-clothing-personal-pilot:B002JVWOO8",
+          "caption": "A dark grey lace-up ankle boot with a thick black rugged sole and padded collar."
+        },
+        {
+          "id": "amazon-clothing-personal-pilot:B0042ANDY4",
+          "caption": "An olive green and grey lace-up hiking boot with a high padded ankle and thick sole."
+        },
+        {
+          "id": "amazon-clothing-personal-pilot:B007UXNDX6",
+          "caption": "A brown lace-up ankle boot with a black toe section and thick dark sole."
+        }
+      ]
+    },
+    {
+      "id": "silver_pendants",
+      "intent": "Silver-colored necklaces with small pendants; geometry matters, metal purity is not judged visually.",
+      "family": "\\bnecklace\\b",
+      "reject": "",
+      "requirements": [],
+      "seeds": [
+        {
+          "id": "amazon-clothing-personal-pilot:B002LZ84K0",
+          "caption": "A silver colored necklace with an open interwoven knot pendant on a chain."
+        },
+        {
+          "id": "amazon-clothing-personal-pilot:B00DHHTAVS",
+          "caption": "A silver colored necklace with a cross shaped pendant on a chain."
+        },
+        {
+          "id": "amazon-clothing-personal-pilot:B00DYMJLT2",
+          "caption": "A silver colored necklace with a looping infinity shaped pendant on a thin chain."
+        }
+      ]
+    }
+  ],
+  "evaluation_notes": [
+    "Queries and seeds stayed fixed. After the preliminary run, narrowed the title rejection rule to dress shoes/sandals/pumps/shirts compounds so valid T-shirt dresses are not rejected. Added title-family controls to the bounded description pool because its first version contained no bow ties. These are exploratory evaluation corrections, not held-out validation or model tuning."
+  ]
+}

@@ -35,8 +35,8 @@ class ProductTypeTests(unittest.TestCase):
         self.assertTrue(is_relevant_product({**product, "title": "Blue Bow Tie"}, "blue bow tie"))
 
     def test_bow_tie_filters_before_limit_even_with_parent_filter(self):
-        rows = [("tie", "Blue Tie", "bow tie", None, "Apparel & Accessories", None, None, .99),
-                ("bow", "Blue Bow Tie", "", None, "Apparel & Accessories", None, None, .6)]
+        rows = [("tie", "Blue Tie", "bow tie", None, "Apparel & Accessories", None, .99),
+                ("bow", "Blue Bow Tie", "", None, "Apparel & Accessories", None, .6)]
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = rows
         with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
@@ -73,9 +73,9 @@ class ProductTypeTests(unittest.TestCase):
 
     def test_plain_query_filters_wrong_types_before_return_limit(self):
         rows = [("sweater", "Cotton Sweater", "Cotton shirt brand story", None,
-                 "Apparel & Accessories > Clothing", None, None, .99),
+                 "Apparel & Accessories > Clothing", None, .99),
                 ("shirt", "Cotton Shirt", "Cotton", None,
-                 "Apparel & Accessories > Clothing", None, None, .6)]
+                 "Apparel & Accessories > Clothing", None, .6)]
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = rows
         with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
@@ -94,8 +94,8 @@ class ProductTypeTests(unittest.TestCase):
                 return MagicMock(fetchall=lambda: [("seed", [1., 0.], "Leather Jacket", "test-revision")])
             self.assertIn("COALESCE(p.title, '') ~* %s", sql)
             return MagicMock(fetchall=lambda: [
-                ("jeans", "Black Jeans", "", None, "Apparel & Accessories > Clothing", None, None, .95),
-                ("jacket", "Winter Jacket", "", None, "Apparel & Accessories > Clothing", None, None, .7)])
+                ("jeans", "Black Jeans", "", None, "Apparel & Accessories > Clothing", None, .95),
+                ("jacket", "Winter Jacket", "", None, "Apparel & Accessories > Clothing", None, .7)])
         connection.execute.side_effect = execute
         with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"), \
              patch("rag.retrieval.embed_texts") as embed:
@@ -110,7 +110,7 @@ class ProductTypeTests(unittest.TestCase):
             if "SELECT e.product_id,e.embedding::real[]" in sql:
                 return MagicMock(fetchall=lambda: [("seed", [1., 0.], "Leather Jacket", "test-revision")])
             return MagicMock(fetchall=lambda: [
-                ("shirt", "Cotton Shirt", "", None, "Apparel & Accessories > Clothing", None, None, .7)])
+                ("shirt", "Cotton Shirt", "", None, "Apparel & Accessories > Clothing", None, .7)])
         connection.execute.side_effect = execute
         with patch("rag.retrieval.psycopg.connect") as connect, patch("rag.retrieval.register_vector"):
             connect.return_value.__enter__.return_value = connection

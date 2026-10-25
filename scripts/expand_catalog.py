@@ -17,7 +17,7 @@ import psycopg
 
 from agent.config import settings
 from rag.catalog import ROOT, Manifest, ingest
-from rag.download_catalog import download_pilot
+from rag.download_catalog import download_catalog
 from rag import CATALOG_WRITE_LOCK
 
 PROMOTED_FILES = ('records.jsonl', 'manifest.json', 'pilot-report.json')
@@ -129,7 +129,7 @@ def main() -> None:
         stage = ROOT / ".data" / "expansions" / stamp
         plan = seed.model_copy(update={"images": {}, "source_lines": {}, "max_products": 2000})
         print(f"Staging acquisition in {stage}; preserving {len(seed.images)} existing products", flush=True)
-        report = download_pilot(plan, stage, seed_root=active)
+        report = download_catalog(plan, stage, seed_root=active)
     print(json.dumps({k: v for k, v in report.items() if k != "samples"}, indent=2), flush=True)
     if report["accepted"] <= len(seed.images):
         raise RuntimeError("No new products acquired; active catalog unchanged")

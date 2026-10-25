@@ -1,4 +1,4 @@
-"""Normalize and import a bounded local Amazon metadata pilot.
+"""Normalize and import a bounded local Amazon catalog.
 
 Run ``uv run python -m rag.catalog .data/catalog/manifest.json`` after preparing
 source metadata and local images. This module never acquires remote data.
@@ -19,9 +19,8 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 from agent.config import ROOT, settings
-from . import CATALOG_WRITE_LOCK
+from . import APPAREL_CATEGORY, CATALOG_WRITE_LOCK
 
-ROOT_CATEGORY = "Apparel & Accessories"
 SOURCE_ROOTS = {"Clothing, Shoes & Jewelry", "Clothing_Shoes_and_Jewelry"}
 
 
@@ -115,7 +114,7 @@ def normalize_metadata(row: dict[str, Any], min_description_words: int = 50, qua
     """Validate apparel source fields before spending network or decode work.
 
     Returns normalized database fields except image and source provenance. Raw
-    upstream fields are preserved with the runtime-compatible taxonomy key.
+    upstream fields are preserved with the apparel taxonomy key.
     """
     asin, title = row.get("parent_asin"), row.get("title")
     if not isinstance(asin, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", asin):
@@ -134,7 +133,7 @@ def normalize_metadata(row: dict[str, Any], min_description_words: int = 50, qua
     branch = next((branches[item] for item in categories if item in branches), None)
     if branch is None:
         raise ValueError("taxonomy_branch")
-    category = ROOT_CATEGORY + " > " + branch
+    category = APPAREL_CATEGORY + " > " + branch
     description = "\n\n".join(string_list(row.get("description", [])))
     if len(re.findall(r"\b\w+\b", description)) < min_description_words:
         raise ValueError("short_description")
@@ -172,9 +171,27 @@ def normalize(row: dict[str, Any], manifest: Manifest, root: Path) -> dict[str, 
     Rejects unsupported taxonomy, incomplete descriptions/details and unsafe or
     invalid local images. No model is called and no missing facts are generated.
     """
+    product = normalize_metadata(row, manifest.min_description_words, manifest.quality_policy)
+    return attach_image(product, row, manifest, root)
+
+
+def attach_image(product: dict[str, Any], row: dict[str, Any], manifest: Manifest, root: Path) -> dict[str, Any]:
+    """Validate image provenance and decoding for already normalized metadata.
+
+    Args:
+        product: Fields returned by normalize_metadata, never mutated.
+        row: Original metadata supplying permitted image URLs.
+        manifest: Source identity and local image inventory.
+        root: Asset directory; paths must remain within it.
+
+    Returns:
+        Product fields with source identity, image dimensions and content hash.
+
+    Raises:
+        ValueError: For unsafe, missing, oversized or undecodable image assets.
+    """
     from PIL import Image, UnidentifiedImageError
 
-    product = normalize_metadata(row, manifest.min_description_words, manifest.quality_policy)
     asin = product["source_product_id"]
     asset = manifest.images.get(asin, {})
     if asset.get("source_url") not in image_urls(row.get("images")):
@@ -204,20 +221,8 @@ def normalize(row: dict[str, Any], manifest: Manifest, root: Path) -> dict[str, 
     }
 
 
-
-def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any]:
-    """Import a bounded local manifest in the caller's transaction.
-
-    Writes source provenance, idempotent products and a report returned to the
-    caller. Changed source records invalidate their stored embeddings. Existing
-    source IDs cannot be reused with different revision/curation decisions.
-    """
-    connection.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_WRITE_LOCK,))
-    if manifest_path.stat().st_size > 2_000_000:
-        raise ValueError("manifest_byte_limit")
-    manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-    root = manifest_path.parent.resolve()
-    records = local_asset(root, manifest.records)
+def _register_source(connection: psycopg.Connection, manifest: Manifest) -> None:
+    """Lock source provenance; allow only monotonic increases in scan budgets."""
     config = manifest.model_dump(exclude={"images", "rights_evidence", "source_lines"}, exclude_none=True)
     provenance = (manifest.source_name, manifest.revision, manifest.source_url,
                   manifest.rights_status, manifest.rights_evidence, config)
@@ -240,6 +245,40 @@ def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any
             raise ValueError("Source ID already has different provenance or curation settings")
         connection.execute("UPDATE dataset_sources SET curation_config=%s WHERE id=%s",
                            (Jsonb(config), manifest.source_id))
+
+
+def _upsert_product(connection: psycopg.Connection, product: dict[str, Any]) -> None:
+    """Lock/upsert one product and invalidate vectors only when source hashes change."""
+    previous = connection.execute(
+        "SELECT source_record_sha256,image_sha256 FROM products WHERE id=%s FOR UPDATE",
+        (product["id"],),
+    ).fetchone()
+    if previous and previous != (product["source_record_sha256"], product["image_sha256"]):
+        connection.execute("DELETE FROM product_embeddings WHERE product_id=%s", (product["id"],))
+    from psycopg import sql
+    columns = list(product)
+    connection.execute(sql.SQL("INSERT INTO products ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET {}").format(
+        sql.SQL(",").join(map(sql.Identifier, columns)),
+        sql.SQL(",").join(sql.Placeholder(key) for key in columns),
+        sql.SQL(",").join(sql.SQL("{}=EXCLUDED.{}").format(sql.Identifier(key), sql.Identifier(key))
+                         for key in columns if key != "id"),
+    ), product)
+
+
+def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any]:
+    """Import a bounded local manifest in the caller's transaction.
+
+    Writes source provenance, idempotent products and a report returned to the
+    caller. Changed source records invalidate their stored embeddings. Existing
+    source IDs cannot be reused with different revision/curation decisions.
+    """
+    connection.execute("SELECT pg_advisory_xact_lock(%s)", (CATALOG_WRITE_LOCK,))
+    if manifest_path.stat().st_size > 2_000_000:
+        raise ValueError("manifest_byte_limit")
+    manifest = Manifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    root = manifest_path.parent.resolve()
+    records = local_asset(root, manifest.records)
+    _register_source(connection, manifest)
     report: dict[str, Any] = {"source_id": manifest.source_id, "scanned": 0, "bytes": 0,
                               "accepted": 0, "rejected": Counter(), "stop_reason": "eof"}
     seen: set[str] = set()
@@ -277,20 +316,7 @@ def ingest(connection: psycopg.Connection, manifest_path: Path) -> dict[str, Any
             seen.add(product["source_product_id"])
             product["source_line"] = manifest.source_lines.get(product["source_product_id"], report["scanned"])
             product["source_record_sha256"] = hashlib.sha256(line).hexdigest()
-            previous = connection.execute(
-                "SELECT source_record_sha256,image_sha256 FROM products WHERE id=%s FOR UPDATE",
-                (product["id"],),
-            ).fetchone()
-            if previous and previous != (product["source_record_sha256"], product["image_sha256"]):
-                connection.execute("DELETE FROM product_embeddings WHERE product_id=%s", (product["id"],))
-            from psycopg import sql
-            columns = list(product)
-            connection.execute(sql.SQL("INSERT INTO products ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET {}").format(
-                sql.SQL(",").join(map(sql.Identifier, columns)),
-                sql.SQL(",").join(sql.Placeholder(key) for key in columns),
-                sql.SQL(",").join(sql.SQL("{}=EXCLUDED.{}").format(sql.Identifier(key), sql.Identifier(key))
-                                 for key in columns if key != "id"),
-            ), product)
+            _upsert_product(connection, product)
             report["accepted"] += 1
         else:
             report["stop_reason"] = "product_limit" if report["accepted"] >= manifest.max_products else "line_limit"

@@ -127,7 +127,7 @@ class SearchIntentTests(unittest.TestCase):
         intent = SearchIntent(product_phrase='ear cuff', search_terms=['silver earcuff'])
         item = {'id': 'cuff', 'title': 'Silver Ear Cuff'}
         with patch('agent.api.psycopg.connect') as connect, patch('agent.api._find_image_path', return_value=None):
-            connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = [('cuff', '', [], {}, {}, 'Silver Ear Cuff', None, 'Apparel & Accessories', None, None, None, None)]
+            connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = [('cuff', '', [], {}, {}, 'Silver Ear Cuff', None, 'Apparel & Accessories', None, None, None)]
             response = _response({'recommendations': [item], 'search_intent': intent.model_dump(),
                                   'query_context': 'silver ear cuff'}, 'test', 'Results', create_surface=True)
         self.assertEqual(response['search_intent'], intent.model_dump())
@@ -137,8 +137,8 @@ class SearchIntentTests(unittest.TestCase):
     def test_dynamic_phrase_applies_before_limits_to_all_rankers(self):
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
-            ('wrong', 'Silver Bracelet', 'ear cuff', None, 'Apparel & Accessories', None, None, .99),
-            ('correct', 'Silver Ear Cuffs', '', None, 'Apparel & Accessories', None, None, .6)]
+            ('wrong', 'Silver Bracelet', 'ear cuff', None, 'Apparel & Accessories', None, .99),
+            ('correct', 'Silver Ear Cuffs', '', None, 'Apparel & Accessories', None, .6)]
         with patch('rag.retrieval.psycopg.connect') as connect, patch('rag.retrieval.register_vector'), \
              patch('rag.retrieval._search_bm25', return_value=[]) as bm25, \
              patch('rag.retrieval.embed_texts', return_value=[[1., 0.]]), \

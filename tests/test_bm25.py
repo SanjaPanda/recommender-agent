@@ -10,7 +10,7 @@ from rag.retrieval import _search_bm25, retrieve_products
 
 def product(identifier, score):
     return (identifier, "Cotton shirt", "shirt", None,
-            "Apparel & Accessories > Clothing", None, False, score)
+            "Apparel & Accessories > Clothing", None, score)
 
 
 class BM25Tests(unittest.TestCase):
@@ -60,12 +60,12 @@ class BM25Tests(unittest.TestCase):
 
     def test_features_are_searchable_and_sql_preserves_filters(self):
         connection = MagicMock()
-        row = (*product("a", 0)[:7], ["Waterproof cotton fabric"])
+        row = (*product("a", 0)[:6], ["Waterproof cotton fabric"])
         connection.execute.return_value.fetchall.return_value = [row]
         result = _search_bm25(connection, query="waterproof", category_clause=" AND p.category=%s",
                               category_params=["Apparel & Accessories"], excluded_ids=["seed"], limit=5)
         self.assertEqual(result[0][0], "a")
-        self.assertGreater(result[0][7], 0)
+        self.assertGreater(result[0][6], 0)
         sql, params = connection.execute.call_args.args
         self.assertIn("p.id <> ALL(%s)", sql)
         self.assertEqual(params, ["Apparel & Accessories", ["seed"]])

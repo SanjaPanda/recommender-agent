@@ -1,55 +1,50 @@
-# Agent guide
+# Agent behavior
 
-## Responsibilities
+## Turn execution
 
-The application is one LangGraph agent with three steps: route the latest user message, retrieve apparel candidates, and form the response. Plain product searches skip edit interpretation but receive structured local LLM search-intent extraction in the retrieval step. Messages changing filters/preferences or requesting unsupported behavior also use the Ollama edit router. FastAPI validates external requests; PostgreSQL persists session state and the cart; the UI receives a bounded set of product cards and A2UI operations.
+One LangGraph workflow runs three nodes: router, retrieval and response. FastAPI validates user requests, PostgreSQL persists sessions/cart, and the UI receives bounded product cards plus A2UI operations.
 
-The route step calls Ollama with a typed `RouterRequest` and validates `TurnEdits`. Code applies supported edits atomically. Category, brand, condition, title color/product filters, product selection, and cart eligibility are deterministic checks. Preferences persist across turns. Unsupported prices and ambiguous edits produce clarification responses.
+Natural-language searches and refinements make one local Ollama call. The router receives the previous plan, whether the session is new, the latest message, available categories and displayed products. It returns a complete `RouterDecision`: updated query, filters, preferences, result count and grounded search interpretation. It also names cleared filters in `removed_filters`, which the UI displays. The model is instructed to preserve untouched constraints and reconcile replacements; Pydantic validates category scope, removal flags and interpretation evidence before state changes. Ambiguous requests return clarification while preserving the search plan and cards.
 
-## Data contracts
+Explicit UI actions already identify an operation and its inputs. Category choices, selected examples and reset update validated state without a router call. Cart actions use a separate deterministic path; neither cart contents nor cart actions are part of the LLM contract. For example, clicking Add to cart sends the product ID directly to the cart handler.
 
-- `Plan`, `Filters`, `Preference`, and `TurnEdits` define shopping state and router output.
-- `RouterRequest` and `ExplanationRequest` define structured LLM inputs.
-- `SearchIntentRequest` and `SearchIntent` extract an open-vocabulary product phrase, equivalent search terms and attributes with exact request evidence. The interpretation is saved with its source query and reused only for identical query/preference text. Extraction errors stop the turn; there is no silent fallback to product-type guesses.
+Explicit condition requests receive an unsupported response before model calls or retrieval because the catalog does not reliably identify new/used products. Price/budget filtering is unsupported. Missing product facts remain unknown.
 
-Product grounding tolerates regular singular/plural and supported spelling variants using the same phrase matcher as retrieval. For example, model output `dress` is supported by request `Dresses`; this is not an unrelated inferred product. Complete phrase boundaries remain required, and attribute values/evidence still require literal request support.
-- `Summary` validates optional free-form summary text.
-- FastAPI request models validate discovery, session, cart, and refinement inputs.
+## Contracts and inference
 
-`complete()` accepts a Pydantic v2 input model and output model class. It sends the output JSON Schema to Ollama, parses the returned JSON with Pydantic, and raises `ModelError` if the provider is unavailable or returns invalid data. Calls have bounded timeouts and no hidden retries.
+- `Plan`, `Filters` and `Preference` describe saved shopping state; `RouterDecision` adds the interpretation and filter-removal flags.
+- `RouterRequest` supplies the previous plan, session-new flag, latest message, eligible categories and displayed product references.
+- `SessionTurn` validates user text and explicit category, example, reset or cart inputs.
+- `SearchIntentRequest` and `SearchIntent` describe a product phrase, equivalent lexical terms and quoted request attributes.
+- `ExplanationRequest` and `Summary` bound optional grounded response prose.
+- API models validate discovery, session, refinement, selections and cart operations.
 
-## Product identity and missing data
+`agent.llm.complete()` sends Pydantic JSON Schema to local Ollama and validates the returned data. Errors raise `ModelError`; calls have bounded timeouts and no hidden retries. Search-intent generation releases the local LLM before retrieval encoders need memory. Summary generation is disabled by default.
 
-The stable source ID is carried unchanged in PostgreSQL, embeddings, saved sessions, API product cards, and A2UI selections. Missing descriptions, brands, or local image files are allowed. Missing images omit the UI image URL and do not prevent text retrieval. Products missing CLIP vectors cannot be used as visual examples; the expanded 2,000-product catalog has both vector modalities; independently judged relevance evaluation remains pending.
+## Retrieval and responses
 
-Image descriptions are outside the active product pipeline. The small catalog uses product text and CLIP image vectors; no vision-language model is loaded and no caption generation, caption embedding, or caption import commands are installed.
+The effective query combines the product need with preserved preferences. Natural-language turns include its interpretation in the router response, avoiding a second model call. Example-only and category actions reuse the saved interpretation when the effective query is unchanged; saved sessions without a matching interpretation use standalone extraction. Empty-query browsing and image-only searches need no interpretation. The UI interpretation panel shows request interpretation, not verified catalog facts.
 
-Retrieval always constrains the root category to `Apparel & Accessories`, including before database cleanup. Saved sessions from the old mixed catalog are filtered to currently valid apparel product IDs when loaded or continued; the session row and message history remain in PostgreSQL.
+Product-phrase grounding accepts regular singular/plural and supported spelling variants, while requiring complete evidence. For example, `dress` can be grounded by `Dresses`; an unrelated or shortened compound cannot. Attributes must be quoted from the request. The interpreted phrase constrains primary titles before retrieval limits; proposed equivalent terms expand BM25 only.
 
-## Local interfaces
+Retrieval combines BM25, Nomic text, query-to-image CLIP and selected-image examples using weighted RRF. Strong matches pass the relevance gate. When none pass, alternatives retain apparel/category/brand/product-phrase constraints; title color/type may relax. The response explains missing matches and may show fewer than five cards. Ranking parameters and evidence rules are specified in [architecture](architecture.md#search-and-ranking).
 
-Search-intent calls release the local LLM after generation so retrieval encoders can use memory. Other routing/summary calls retain their existing keep-alive behavior. The current local `.env` selects the existing `AGENT_NUM_GPU=0` CPU inference option after an integrated partial-offload request timed out; this is a machine-specific setting, not a measured general speedup.
+Product details expose source descriptions, features, structured details and snapshot ratings. Similarity details separate raw BM25, cosine values and RRF contributions. Match checks report explicit listing evidence as match/mismatch/unknown. Color filtering uses titles; image color and other preferences are not guaranteed.
 
-- API: `uv run recommender-agent-api` (`http://127.0.0.1:8000`)
-- Web/A2UI: `docker compose up -d --build web` (`http://localhost:3000`)
-- Terminal harness: `uv run recommender-agent-chat`
-- Retrieval inspection: `uv run recommender-search "blue cotton dress"`
+## Sessions, selections and cart
 
-The web gallery supports selecting up to three displayed products as visual examples and adding free-text preference refinements. See [setup](SETUP.md) and [architecture](architecture.md).
+Stable source IDs connect database rows, vectors, sessions and cards. Users can select up to three displayed products as visual examples. Selected products need compatible stored image vectors; selecting an example does not add it to the cart. Cart buttons require eligible product IDs. Adding a product removes it from recommendations and selected examples. Every retrieval mode excludes cart IDs before candidate limits. Removing a cart item makes it eligible for the next search; existing cards stay in place. Cart actions preserve the query, filters and preferences and require no inference.
 
-Expand **How your request was understood** to inspect the interpreted product phrase, quoted attributes and proposed search terms. These are request interpretation, not verified product facts. The source product phrase must end a main-title segment before candidate limits; proposed terms expand BM25 ranking only. Vectors retain the original query and RRF weights are unchanged. This avoids a growing subtype ontology but can miss synonym-only titles. New textual searches require one additional local model call; unchanged-query turns reuse the saved interpretation. Browse, cart and image-only operations do not require this extraction call.
+Missing brands, descriptions or local image files do not prevent text retrieval. Missing images omit the image URL. Resume refreshes facts and checks product eligibility/source hashes. Changed source evidence invalidates saved recommendations/scores and refreshes cart facts. Unsupported saved fields are removed safely before plan validation; message history and session identity remain.
 
-Each API response includes an `Agent trace` summary for the current turn: router, retrieval, and response node durations, selected route/status, result counts, and how many displayed products have text, CLIP, or selected-example scores. Expand the trace beneath the message in the UI. It omits user text, prompts, product descriptions, and model reasoning, and it is not persisted in session snapshots.
+Session turns reject overlaps with HTTP 409, run inference outside transactions and reject stale saves. Existing snapshots with cart action plans are normalized on load, and cart/recommendation overlap is removed without rewriting the stored snapshot during read-only resume. See [state safeguards](architecture.md#state-and-evidence-safeguards) and [database contracts](database.md#sessions-and-caches).
 
-Search results are relevance-gated instead of always filling five cards. Strong matches must pass explicit color/product text checks (or CLIP can support a visible color) and the initial score cutoffs: Nomic text similarity 0.61 or query-to-image CLIP similarity 0.28. Exact title/description term matches may pass below those cutoffs. If no strong result passes, the response apologizes and shows closest alternatives; selected subcategory, brand, and condition filters stay active for both lists. Only legacy title color/product filters are relaxed for fallback suggestions; an extracted product phrase remains required. The threshold values are legacy defaults, unvalidated on any replacement dataset.
+## Interfaces
 
-Explicit known query types are now checked against primary product titles in retrieval and the strong-match gate. Image-only searches inherit a type only from unanimously known seed title types; explicit product-type filters override seed inference. Same-type filtering may return fewer than five products. It does not validate material, age/gender or image semantics, and unreviewed extraction candidates remain outside hard filters.
+```powershell
+uv run recommender-agent-api
+uv run recommender-agent-chat
+uv run recommender-search "blue cotton dress"
+```
 
-Query retrieval now includes BM25 over source title/description/features in addition to Nomic and CLIP. Weighted RRF combines their ranks (k=60, equal base query weights; nonempty modes renormalized). Product payloads retain raw BM25, cosine scores and each RRF contribution; the card details show these separately. No LLM is required for BM25 or score fusion.
-
-BM25 candidates retain their source features for the relevance gate: feature-only keyword intent can pass lexical checks. Color checks continue to use the prior title/description/CLIP rules; a color mentioned only in a feature variant is not automatically verified.
-
-
-## State and evidence safeguards
-
-Color changes reconcile the effective query and saved preferences. Session turns reject overlaps with HTTP 409 and run inference outside database transactions. Changed source hashes invalidate historical cards and refresh cart facts. Encoder revisions/dimensions and conservative primary phrase boundaries are enforced. See the [canonical architecture safeguards](architecture.md#audit-hardening-state-provenance-and-phrase-evidence) for the contracts, recovery behavior and recall limitations.
+The API runs at <http://127.0.0.1:8000>; the Docker web UI runs at <http://localhost:3000>. Each completed turn includes a safe node trace with durations, route/status and modality/result counts. It excludes input text, prompts and model reasoning and is not stored in the session snapshot. Follow [setup](SETUP.md) before running these interfaces.

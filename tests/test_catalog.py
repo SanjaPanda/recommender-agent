@@ -190,13 +190,13 @@ class CatalogDatabaseTests(unittest.TestCase):
         rows = _search_bm25(self.connection, excluded_ids=[], **kwargs)
         product_id = self.config["source_id"] + ":AUTHORED1"
         self.assertEqual([r[0] for r in rows], [product_id])
-        self.assertGreater(rows[0][7], 0)
+        self.assertGreater(rows[0][6], 0)
         self.assertEqual(_search_bm25(self.connection, excluded_ids=[product_id], **kwargs), [])
         self.connection.execute('UPDATE products SET features=%s WHERE id=%s', (Jsonb(['Freshword linen']), product_id))
         self.assertEqual(_search_bm25(self.connection, excluded_ids=[], **kwargs), [])
         refreshed = _search_bm25(self.connection, excluded_ids=[], **{**kwargs, 'query': 'freshword'})
         self.assertEqual([r[0] for r in refreshed], [product_id])
-        self.assertEqual(refreshed[0][8], ['Freshword linen'])
+        self.assertEqual(refreshed[0][7], ['Freshword linen'])
         self.connection.execute('DELETE FROM products WHERE id=%s', (product_id,))
         self.assertEqual(_search_bm25(self.connection, excluded_ids=[], **{**kwargs, 'query': 'freshword'}), [])
 

@@ -1,0 +1,8 @@
+{"id":"compound","query":"blue bow tie","product_phrase":"bow tie","attributes":[{"name":"color","value":"blue","excluded":false}]}
+{"id":"material","query":"black cotton dress","product_phrase":"dress","attributes":[{"name":"color","value":"black","excluded":false},{"name":"material","value":"cotton","excluded":false}]}
+{"id":"accessory","query":"silver ear cuffs","product_phrase":"ear cuff","attributes":[{"name":"color","value":"silver","excluded":false}]}
+{"id":"plural","query":"Dresses","product_phrase":"dress","attributes":[]}
+{"id":"exclusion_only","query":"not wool","product_phrase":"","attributes":[{"name":"material","value":"wool","excluded":true}]}
+{"id":"color_exclusion","query":"dress not blue","product_phrase":"dress","attributes":[{"name":"color","value":"blue","excluded":true}]}
+{"id":"generic","query":"blue clothes","product_phrase":"","attributes":[{"name":"color","value":"blue","excluded":false}]}
+{"id":"compound_boots","query":"ankle boots","product_phrase":"ankle boot","attributes":[]}

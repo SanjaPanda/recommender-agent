@@ -21,6 +21,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from agent.config import settings
 from agent.models import Plan, Filters
+from agent.workflow import sanitize_apparel_products
 from rag.retrieval import APPAREL_CATEGORY, retrieve_products
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +44,7 @@ def main() -> None:
               'router_timeout_seconds': settings.agent_router_timeout_seconds}
     thread = 'acceptance-' + str(uuid4())
     process = None
-    artifacts = ROOT / '.data'
+    artifacts = ROOT / '.codex-work'
     artifacts.mkdir(exist_ok=True)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
@@ -148,7 +149,7 @@ def main() -> None:
                 "AND starts_with(p.raw_source->>'ground_truth_category', 'Apparel & Accessories > ') "
                 'ORDER BY p.id LIMIT 1').fetchone()
         if report['products'] == 0:
-            raise RuntimeError('Live checks require a populated compatible catalog; dataset reset is active.')
+            raise RuntimeError('Live checks require an imported catalog with compatible text and image vectors.')
         check('Catalog is populated for live checks', report['products'] > 0)
         check('Catalog contains only Apparel & Accessories rows', roots == [APPAREL_CATEGORY])
         check('Every apparel product has text and CLIP vectors', products_missing_core_vectors == 0)
@@ -176,6 +177,7 @@ def main() -> None:
                            'recommendations': retrieve_products(filters={'brand': brands[0]}, limit=5),
                            'cart': [], 'selected_product_ids': [], 'status': 'ok'}
                 with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
+                    fixture = sanitize_apparel_products(connection, fixture, invalidate_changed=False)
                     connection.execute('UPDATE agent_sessions SET state=%s WHERE thread_id=%s',
                                        (Jsonb(fixture), thread))
                 state = post('/api/session', {'thread_id': thread})
@@ -187,6 +189,8 @@ def main() -> None:
             product = state['products'][0]['id']
             state = post('/api/cart', {'thread_id': thread, 'action': 'cart_add', 'product_ids': [product]})
             check('Explicit add persists cart item', [p['id'] for p in state['cart']] == [product])
+            check('Cart item leaves recommendations and selections',
+                  product not in {p['id'] for p in state['products']} and product not in state['selected_product_ids'])
             saved = state
             process.terminate()
             process.wait(timeout=10)

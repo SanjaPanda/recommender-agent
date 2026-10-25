@@ -1,0 +1,3 @@
+# Optional VS Code/Jupyter kernel; the supplied plain-Python runner does not need this.
+# Application/image dependencies come from uv sync --extra image.
+ipykernel==6.30.1
