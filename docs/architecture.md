@@ -22,8 +22,10 @@ User text / selected catalog products
 | Module | Responsibility |
 | --- | --- |
 | `rag.download_catalog` | Bounded HTTPS acquisition, image attempts and rejection reports |
-| `rag.catalog` | Manifest validation, metadata/image normalization, provenance registration and upserts |
-| `rag.embed_text`, `rag.embed_images` | Offline revisioned vector generation |
+| `rag.source` | Manifest schema, bounded local record reads and safe asset paths |
+| `rag.catalog` | Metadata/image normalization, evidence extraction, provenance and transactional upserts |
+| `rag.embed_text`, `rag.embed_images` | Modality-specific input preparation and offline encoding |
+| `rag.embedding_store` | Shared pending-revision selection and atomic batch upserts |
 | `agent.tools.embeddings`, `agent.tools.clip_runtime` | Shared validated local encoders |
 | `agent.tools.retrieval`, `agent.tools.bm25` | Shared SQL eligibility, candidate scoring and RRF |
 | `rag.phrases`, `rag.product_types` | Request/title evidence and conservative title-family matching |
@@ -44,11 +46,62 @@ Acquisition is bounded by metadata lines/bytes, image bytes/attempts and wall ti
 
 `rag.attributes` extracts unreviewed source-evidence candidates with offsets and component/variant/measurement scope. `rag.quality` reports evidence quality and can enforce the manifest's optional `evidence-v2` policy. Neither module supplies verified runtime hard filters.
 
+## Offline execution boundaries
+
+```mermaid
+flowchart TD
+    Plan[Pinned source decision] --> Acquire[download_catalog: bounded remote scan]
+    Seed[Existing catalog] --> Copy[Validate and copy seed records/images]
+    Copy --> Acquire
+    Acquire --> Assets[Original JSONL bytes, manifest and decoded image inventory]
+    Assets --> Import[catalog: normalize, validate image, extract evidence]
+    Source[source: manifest and safe local records] --> Copy
+    Source --> Import
+    Source --> Reports[quality report or attributes enrichment]
+    Import --> Commit[Locked source/product transaction and hash-based invalidation]
+    Commit --> DB[(PostgreSQL products)]
+    DB --> Text[embed_text: Nomic document formatting and raw vectors]
+    DB --> Image[embed_images: local RGB images and normalized CLIP vectors]
+    Text --> Store[embedding_store: revision selection and atomic batch upserts]
+    Image --> Store
+    Store --> Vectors[(Revisioned product embeddings)]
+    Vectors --> Runtime[Online retrieval]
+```
+
+Acquisition uses plain metadata and validated images; it does not extract attribute
+candidates. Import adds the same extraction document before adapting JSON fields
+to PostgreSQL `Jsonb` at `_upsert_product`. Raw source lines and image bytes, not
+reserialized metadata, remain the invalidation keys. Existing imports of
+`Manifest` and `local_asset` from `rag.catalog` continue to resolve directly to
+`rag.source`; no compatibility wrapper or duplicate implementation is needed.
+
+Local reporting/enrichment and seed reads share bounded record access. The importer
+keeps its explicit stop reasons and rejected-record accounting. Remote acquisition
+keeps its separate bounded oversized-line draining logic. These policies differ
+intentionally. Publication keeps backup, prepare, journal, database commit and file
+replacement in their existing order, with `_prepare_publication` naming the file
+preparation stage. Recovery remains idempotent and hash checked.
+
+Text/image jobs share pending-revision SQL and batch persistence, while keeping
+their different input preparation and normalization. A batch fails atomically on
+encoder cardinality mismatch or SQL errors; earlier committed batches remain.
+The maintenance lock spans each job. No schema, encoder revision, source bytes,
+input formatting, model weights or application dependencies changed in this
+simplification, and it does not require rebuilding the catalog or vectors.
+
 ## Search and ranking
 
 Textual application searches use a typed local LLM `SearchIntent`: a request-supported core product phrase, proposed equivalent search terms and quoted attributes. Phrase validation accepts supported regular inflections and joined/hyphenated spelling. Negated products cannot become positive intent; meaningful modifiers must be accounted for. Empty/unclear product intent remains within apparel-scoped semantic/lexical search.
 
 A nonempty interpreted phrase must occur at a main-title segment boundary before candidate limits in every modality. Description-only or accessory-compatibility mentions do not establish the product. Proposed terms expand BM25 only; vector queries retain the original effective request. `prepare_query()` creates request-local Nomic/CLIP vectors and revision identities once, reused for primary and optional fallback SQL searches. No cross-session query cache is introduced. Saved interpretation is reused only when query and preference text are identical. Invalid extraction fails explicitly without a guessing fallback.
+
+`retrieve_products` now reads in phases: validate inputs, build `_search_scope`,
+browse or validate selected examples, gather modality ranks, then `_fuse_rankings`.
+Shared scope is applied before candidate limits. SQL gates, Python phrase/family
+checks and the workflow relevance gate remain separate correctness boundaries.
+`product_phrase=None` allows family inference; an explicit empty phrase disables it.
+Cart IDs are always excluded; selected examples are excluded unless a title-color
+request permits them. Candidate projections retain existing optional field availability.
 
 Direct retrieval and image-only searches can use conservative product-family checks. Explicit title-product filters take precedence; an image-only family is inherited only when every selected seed has the same known primary title type.
 

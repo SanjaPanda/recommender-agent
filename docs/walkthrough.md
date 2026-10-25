@@ -152,13 +152,43 @@ response boundaries remain intentional freshness checks.
 
 ## Offline processing
 
-`rag.download_catalog` acquires bounded pinned-source metadata/images;
-`rag.catalog` normalizes and imports it transactionally. Optional `rag.attributes`
-and `rag.quality` preserve unreviewed evidence/curation semantics. `rag.embed_text`
-and `rag.embed_images` write revisioned vectors, using shared runtime encoder
-functions where appropriate. `scripts/expand_catalog.py` retains its maintenance
-lock, backups and hash-checked publication journal. No request imports a batch
-embedding command to encode its query.
+1. `rag.source.load_manifest` validates the pinned source decision and size budget.
+   `download_catalog` validates its exact upstream URL, creates fresh staging assets,
+   optionally copies validated seed records/images, then scans remote metadata.
+   Image acquisition retains HTTPS/DNS/redirect checks, request/byte/time budgets,
+   deduplication, full image validation and rate-limit stopping.
+2. Accepted upstream line bytes are written unchanged with original source-line
+   numbers. Acquisition normalizes plain metadata for validation and reports; it
+   does not run attribute extraction or wrap fields for a database that it never uses.
+3. `rag.catalog.ingest` takes the maintenance transaction lock and registers immutable
+   source provenance. For each bounded local line, `normalize_metadata` validates
+   taxonomy/text/details, `attach_image` checks provenance/decoding/content hash,
+   and `normalize` extracts the same unreviewed attribute candidates.
+4. `_upsert_product` locks the prior product, invalidates vectors only on changed
+   raw-record/image hashes, adapts JSON fields and upserts the product. The caller's
+   transaction owns commit/rollback. Missing records are not implicitly deleted.
+5. `rag.embed_text` builds the existing `search_document` input from title,
+   description and all feature bullets, and retains raw Nomic vectors.
+   `rag.embed_images` loads the pinned CLIP processor/model, safely opens local
+   RGB images and normalizes vectors. Decoded images close on success or failure.
+6. Both commands use `rag.embedding_store.pending_clause` to skip a compatible ready
+   revision unless forced, and `store_batch` to commit each complete batch atomically.
+   The maintenance lock spans selection, encoding and storage. No request imports
+   a batch command to encode its query.
+7. Optional `rag.quality` and `rag.attributes` share bounded local source access,
+   preserving review-only evidence semantics. Enrichment requires the imported raw
+   record hash to match before changing only the extraction document.
+8. `scripts/expand_catalog.py` validates or recovers its stage, backs up metadata,
+   calls `_prepare_publication`, writes the hash journal, transactionally imports,
+   then publishes prepared files and removes the journal. Rerun after an interruption;
+   preserve the journal, stage and backups. See [recovery commands](SETUP.md#catalog-maintenance-and-recovery).
+
+Read-only examples using the prepared local catalog, without inference or writes:
+
+```powershell
+.venv/Scripts/python.exe -c "from pathlib import Path; from rag.source import load_manifest; m = load_manifest(Path('.data/catalog/manifest.json')); print(m.source_id, len(m.images))"
+.venv/Scripts/python.exe -c "from agent.tools.retrieval import retrieve_products; print([p['id'] for p in retrieve_products(limit=3)])"
+```
 
 The notebooks remain diagnostic experiments, outside runtime execution. Their
 helper imports the shared ranking/encoding implementation; updated import cells
@@ -182,6 +212,25 @@ The previous source and documents are preserved under
 Git checkpoint `52679a3` preserves the tracked baseline and historical migration
 SQL. Do not restore a snapshot over unrelated user work. Migration history under
 `archive/migrations/` remains an active upgrade dependency.
+
+## RAG and ingestion comparison
+
+| Concern | Before this pipeline pass | After |
+| --- | --- | --- |
+| Retrieval scope | Repeated setup mixed into the main retrieval function | Named scope, browse, vector ranking and fusion phases |
+| Product projection | Browsing and fusion repeated field mapping | Shared six-field projection; optional feature availability preserved |
+| Source access | Manifest/path code in importer; repeated report loops; whole seed read | `rag.source` owns schema, paths and bounded report/seed reads |
+| Normalized values | PostgreSQL wrappers passed through acquisition and inspected via `.obj` | Plain Python values; adaptation at database writes |
+| Extraction | Repeated during acquisition, seed copy and import | Import/enrichment only, with identical imported evidence |
+| Vector persistence | Text/image jobs repeated pending-revision and upsert SQL | `embedding_store` shares storage; each job keeps its modality behavior |
+| Promotion | File preparation embedded inside import/publication orchestration | Explicit preparation helper, unchanged recovery sequence |
+
+Git checkpoint `8198fde` preserves the baseline for this pass and `beece94` the
+validated RAG boundary before ingestion; `57c0ad8` records the tested ingestion refactor. The source snapshot is under
+`archive/before-rag-ingestion-2026-10-25/` with SHA256 inventory and restore notes;
+private catalog data is excluded. Archive directories are local and ignored by Git.
+Use selective restoration or a reviewed revert; code checkpoints do not roll back
+private database/catalog assets. Historical migration SQL remains required.
 
 ## Debugging and extension
 

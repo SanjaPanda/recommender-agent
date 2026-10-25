@@ -104,6 +104,14 @@ Before import, publication prepares replacement files and writes `.data/catalog/
 .venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
 
+Include the PostgreSQL integration tests with:
+
+```powershell
+$env:RUN_DATABASE_TESTS = '1'
+.venv/Scripts/python.exe -m unittest discover -s tests -v
+Remove-Item Env:RUN_DATABASE_TESTS
+```
+
 For opt-in PostgreSQL checks, see [database verification](database.md#verification). Some tests create and clean authored fixtures; schema tests use a disposable database. They are not read-only checks and do not download data or rebuild application vectors.
 
 From `src/ui`:
