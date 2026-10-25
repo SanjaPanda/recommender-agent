@@ -144,20 +144,8 @@ def retrieve_products(
         raise ValueError("select up to three unique product examples")
     active_filters = filters or {}
     exclude_refs = [] if active_filters.get("title_color") else refs
-    wanted_type = requested_product_type(query_context, active_filters.get("title_product")) if product_phrase is None else None
-    sql_filters = active_filters
-    if product_phrase is not None or (wanted_type == "bowtie" and product_type(active_filters.get("title_product") or "") == "tie"):
-        # The interpreted phrase takes precedence over single-word type inference.
-        sql_filters = {**active_filters, "title_product": None}
-    category_clause, category_params = filter_clause(sql_filters, category_prefixes or [])
-    if excluded_product_ids:
-        category_clause += " AND p.id <> ALL(%s)"
-        category_params.append(excluded_product_ids)
-    if product_phrase:
-        category_clause += " AND (regexp_split_to_array(COALESCE(p.title, ''), '\\s+(?:for|with|fits|similar to)\\s+', 'i'))[1] ~* %s"
-        # Apply the same conservative segment boundary before candidate limits;
-        # otherwise high-ranked "Dress Shoes" can crowd actual dresses out.
-        category_params.append(r"\m" + phrase_pattern(product_phrase) + r"\M(?=$|\s*[^[:alpha:][:space:]])")
+    category_clause, category_params, wanted_type = _search_scope(
+        query_context, active_filters, category_prefixes or [], product_phrase, excluded_product_ids)
     candidate_limit = max(limit * 10, 50)
 
     vectors = prepared_query if prepared_query is not None else prepare_query(query_context)
@@ -173,22 +161,7 @@ def retrieve_products(
     with psycopg.connect(settings.database_url.get_secret_value(), connect_timeout=5) as connection:
         register_vector(connection)
         if query_vector is None and not refs:
-            rows = connection.execute(
-                "SELECT p.id,p.title,p.description,p.brand,"
-                "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image "
-                "FROM products p WHERE true" + category_clause + " ORDER BY p.id LIMIT %s",
-                (*category_params, limit),
-            ).fetchall()
-            return [
-                {
-                    "id": row[0], "title": row[1], "description": row[2], "brand": row[3],
-                    "category": row[4], "image_meta": row[5],
-                    "score": 0.0, "text_similarity": None,
-                    "image_similarity": None, "example_similarity": None,
-                    "visual_source": "hybrid",
-                }
-                for row in rows
-            ]
+            return _browse_products(connection, category_clause, category_params, limit)
 
         if refs:
             example_vector, image_version, titles = _selected_example_vector(connection, refs, image_version)
@@ -199,32 +172,24 @@ def retrieve_products(
         if wanted_type:
             category_clause += " AND COALESCE(p.title, '') ~* %s"
             category_params.append(sql_pattern(wanted_type))
-        if refs:
-            example_rows = _search_embedding(
-                connection, vector=example_vector, modality="image", model=IMAGE_MODEL,
-                model_version=image_version,
+        def search_vector(vector, modality, model, revision):
+            """Run one compatible vector signal under this request's SQL scope."""
+            return _search_embedding(
+                connection, vector=vector, modality=modality, model=model, model_version=revision,
                 category_clause=category_clause, category_params=category_params,
-                excluded_ids=exclude_refs, limit=candidate_limit,
-            )
+                excluded_ids=exclude_refs, limit=candidate_limit)
+
+        if refs:
+            example_rows = search_vector(example_vector, 'image', IMAGE_MODEL, image_version)
 
         if query_vector is not None:
             bm25_rows = _search_bm25(
                 connection, query=' '.join([query_context, *(search_terms or [])]), category_clause=category_clause,
                 category_params=category_params, excluded_ids=exclude_refs, limit=candidate_limit,
             )
-            text_rows = _search_embedding(
-                connection, vector=Vector(query_vector), modality="text", model=TEXT_MODEL,
-                model_version=text_version,
-                category_clause=category_clause, category_params=category_params,
-                excluded_ids=exclude_refs, limit=candidate_limit,
-            )
+            text_rows = search_vector(Vector(query_vector), 'text', TEXT_MODEL, text_version)
             if clip_vector is not None:
-                clip_rows = _search_embedding(
-                    connection, vector=Vector(clip_vector), modality="image", model=IMAGE_MODEL,
-                    model_version=image_version,
-                    category_clause=category_clause, category_params=category_params,
-                    excluded_ids=exclude_refs, limit=candidate_limit,
-                )
+                clip_rows = search_vector(Vector(clip_vector), 'image', IMAGE_MODEL, image_version)
 
     ranked_lists: list[tuple[list[tuple[Any, ...]], str, float]] = []
     if query_vector is not None:
@@ -238,6 +203,58 @@ def retrieve_products(
                              0.20 if query_vector is not None else 1.0))
     return _fuse_rankings(ranked_lists, title_product=active_filters.get("title_product"),
                           wanted_type=wanted_type, product_phrase=product_phrase, limit=limit)
+
+
+def _search_scope(query: str, filters: dict[str, Any], category_prefixes: list[str],
+                  product_phrase: str | None, excluded_product_ids: list[str] | None
+                  ) -> tuple[str, list[Any], str | None]:
+    """Resolve filter precedence and mandatory eligibility before candidate limits.
+
+    None product_phrase enables conservative family inference; an empty phrase
+    deliberately disables it. Cart exclusions always apply, independently of
+    whether selected visual examples are retained for a title-color search.
+    Returns the parameterized SQL suffix, values and optional requested family.
+    """
+    wanted_type = requested_product_type(query, filters.get("title_product")) if product_phrase is None else None
+    sql_filters = filters
+    if product_phrase is not None or (wanted_type == "bowtie" and product_type(filters.get("title_product") or "") == "tie"):
+        # The interpreted phrase takes precedence over single-word type inference.
+        sql_filters = {**filters, "title_product": None}
+    category_clause, category_params = filter_clause(sql_filters, category_prefixes)
+    if excluded_product_ids:
+        category_clause += " AND p.id <> ALL(%s)"
+        category_params.append(excluded_product_ids)
+    if product_phrase:
+        category_clause += " AND (regexp_split_to_array(COALESCE(p.title, ''), '\\s+(?:for|with|fits|similar to)\\s+', 'i'))[1] ~* %s"
+        # Apply the same conservative segment boundary before candidate limits;
+        # otherwise high-ranked "Dress Shoes" can crowd actual dresses out.
+        category_params.append(r"\m" + phrase_pattern(product_phrase) + r"\M(?=$|\s*[^[:alpha:][:space:]])")
+    return category_clause, category_params, wanted_type
+
+
+def _product_fields(row: tuple[Any, ...]) -> dict[str, Any]:
+    """Map the common six source columns; scores/features remain signal-specific."""
+    return dict(zip(('id', 'title', 'description', 'brand', 'category', 'image_meta'), row[:6]))
+
+
+def _browse_products(connection: psycopg.Connection, category_clause: str,
+                     category_params: list[Any], limit: int) -> list[dict[str, Any]]:
+    """Read bounded catalog rows in ID order without inventing ranking evidence."""
+    rows = connection.execute(
+        "SELECT p.id,p.title,p.description,p.brand,"
+        "COALESCE(p.raw_source->>'ground_truth_category',p.category),p.image "
+        "FROM products p WHERE true" + category_clause + " ORDER BY p.id LIMIT %s",
+        (*category_params, limit),
+    ).fetchall()
+    return [
+        {
+            **_product_fields(row),
+            "score": 0.0, "text_similarity": None,
+            "image_similarity": None, "example_similarity": None,
+            "visual_source": "hybrid",
+        }
+        for row in rows
+    ]
 
 
 def _selected_example_vector(connection: psycopg.Connection, refs: list[str],
@@ -311,10 +328,9 @@ def _fuse_rankings(ranked_lists: list[tuple[list[tuple[Any, ...]], str, float]],
             continue
         weight = raw_weight / available_weight
         for rank, row in enumerate(rows, start=1):
-            product_id, title, description, brand, category, image_meta, similarity = row[:7]
+            product_id, similarity = row[0], row[6]
             product = fused.setdefault(product_id, {
-                "id": product_id, "title": title, "description": description, "brand": brand,
-                "category": category, "image_meta": image_meta,
+                **_product_fields(row),
                 "image_similarity": None, "example_similarity": None,
                 "text_similarity": None, "bm25_score": None, "rrf_score": 0.0,
                 "rrf_k": 60, "rrf_contributions": [], "score": 0.0, "visual_source": "hybrid",
